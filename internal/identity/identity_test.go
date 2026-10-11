@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 )
 
@@ -69,5 +70,31 @@ func TestLoadRefusesHalfAnIdentity(t *testing.T) {
 	}
 	if _, err := Load(dir); err == nil {
 		t.Error("Load regenerated an identity whose key file was missing")
+	}
+}
+
+// Several first starts at once must agree on one identity. A loser may fail
+// while the winner is still writing, but it must never keep its own key.
+func TestConcurrentFirstLoadsAgree(t *testing.T) {
+	dir := t.TempDir()
+	const n = 16
+	idents := make([]*Identity, n)
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Go(func() { idents[i], _ = Load(dir) })
+	}
+	wg.Wait()
+
+	stored, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, ident := range idents {
+		if ident == nil {
+			continue
+		}
+		if ident.ID != stored.ID || !ident.Key.Equal(stored.Key) {
+			t.Errorf("load %d returned identity %s, but %s is stored", i, ident.ID, stored.ID)
+		}
 	}
 }
