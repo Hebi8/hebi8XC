@@ -4,9 +4,15 @@ A LAN-first network of one user's own machines, with no central server. Every ma
 
 This first step does discovery, the handshake and the node list. The command is `h8c`.
 
-## Build
+## Install
 
 Needs Go 1.27 or newer. No cgo.
+
+```sh
+go install github.com/Hebi8/hebi8XC/cmd/h8c@latest
+```
+
+Or from a checkout:
 
 ```sh
 go build -o h8c ./cmd/h8c
@@ -46,6 +52,8 @@ Trust has to be mutual. If only one side has the other's key, `h8c up` on both s
 Things to know:
 
 - The peer link listens on TCP port **4892** on all interfaces (`--listen` changes it). Tailscale discovery only probes 4892.
+- An address that does not answer is tried less and less often, down to once in 5 minutes. A node that starts later announces itself, so it normally shows up within seconds anyway.
+- One node runs per data directory; a second `h8c up` on the same directory exits.
 - mDNS only matches nodes with the same user id. It defaults to the OS user name; if your machines use different names, pass the same `--user ID` everywhere.
 - State lives in the data directory (`--data-dir`, default `hebi8xc` under the OS config directory, e.g. `~/.config/hebi8xc`). The node name defaults to the host name and can be edited in `node.json`.
 

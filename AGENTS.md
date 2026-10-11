@@ -2,6 +2,8 @@
 
 Nodes on one user's machines that find each other, authenticate and connect directly. Go, single binary `h8c`. Read [docs/design.md](docs/design.md) before changing behavior.
 
+Module `github.com/Hebi8/hebi8XC`, default branch `master`.
+
 ## Commands
 
 Go may not be on PATH: `export PATH=$HOME/.local/go/bin:$PATH`.
