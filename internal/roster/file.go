@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Hebi8/hebi8XC/internal/datadir"
 	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
@@ -22,6 +23,10 @@ type Entry struct {
 // File is a Roster backed by a local file with one "ssh-ed25519 ..." key per
 // line. Blank lines and lines starting with # are ignored. The file belongs
 // to a single user, so the user argument of Keys and Refresh is not used.
+//
+// A change replaces the file in one step, so a reader never sees half a
+// roster. Two programs changing the file at the same moment are not
+// coordinated: the later write wins.
 type File struct {
 	path string
 
@@ -146,7 +151,7 @@ func (f *File) writeLines(lines []string) error {
 	if len(lines) > 0 {
 		text = strings.Join(lines, "\n") + "\n"
 	}
-	if err := os.WriteFile(f.path, []byte(text), 0o644); err != nil {
+	if err := datadir.WriteFile(f.path, []byte(text), 0o644); err != nil {
 		return err
 	}
 	return f.Refresh(context.Background(), "")

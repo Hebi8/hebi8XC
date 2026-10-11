@@ -11,6 +11,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/Hebi8/hebi8XC/internal/datadir"
 )
 
 const (
@@ -201,11 +203,7 @@ func (t *Table) Save(force bool) error {
 	if err != nil {
 		return err
 	}
-	tmp := t.path + ".tmp"
-	if err := os.WriteFile(tmp, append(raw, '\n'), 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, t.path); err != nil {
+	if err := datadir.WriteFile(t.path, append(raw, '\n'), 0o600); err != nil {
 		return err
 	}
 	t.changed, t.touched, t.lastSaved = false, false, now
