@@ -62,7 +62,7 @@ While the app is private, only members of `Hebi8` can log in with it.
 Source: [Get a user using their ID](https://docs.github.com/en/rest/users/users?apiVersion=2022-11-28#get-a-user-using-their-id): `GET /user/{account_id}` "takes their durable user ID instead of their login, which can change over time."
 
 - Tested without credentials: it returns 200 with `id` and `login`.
-- There is no documented endpoint that lists signing keys by id. `GET /user/{account_id}/ssh_signing_keys` answered 200 in a test, but it is not in the documentation and `h8c` does not use it. A refresh therefore takes two requests: the id to the login, then the keys of that login.
+- There is no documented endpoint that lists signing keys by id. `GET /user/{account_id}/ssh_signing_keys` answered 200 in a test, but it is not in the documentation and `h8c` does not use it. A refresh therefore takes two requests: the keys of the login, and the id to check that the login still belongs to the account.
 
 ## SSH signing key endpoints
 
@@ -107,7 +107,7 @@ Sources: [About SSH](https://docs.github.com/en/authentication/connecting-to-git
 
 - Reading the roster needs no token, so none is kept. The token of `h8c login` is used once, to register the key, and then dropped; it expires after 8 hours. `h8c` never asks for the `offline_access` scope and never stores a refresh token.
 - A refresh costs two unauthenticated requests. Nodes refresh every 15 minutes, which is 8 requests per node and hour out of the 60 that one IP address has.
-- The account is identified by its id. The login is looked up again on every refresh.
+- The account is identified by its id. Every refresh looks the login up again, after listing the keys, and drops the list if the login is no longer the one it was read under.
 - Only signing keys titled `hebi8xc: ...` are node keys, so the keys used to sign commits do not become nodes.
 - Anyone who can add a signing key to the account joins the network. The GitHub account, and anything allowed to write its signing keys, is part of the trust base.
 - The account's signing keys are public. Anyone can see how many nodes an account has and what they are called.
