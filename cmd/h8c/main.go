@@ -20,13 +20,13 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"hebi8xc/internal/control"
-	"hebi8xc/internal/discovery"
-	"hebi8xc/internal/identity"
-	"hebi8xc/internal/node"
-	"hebi8xc/internal/peers"
-	"hebi8xc/internal/roster"
-	"hebi8xc/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/control"
+	"github.com/Hebi8/hebi8XC/internal/discovery"
+	"github.com/Hebi8/hebi8XC/internal/identity"
+	"github.com/Hebi8/hebi8XC/internal/node"
+	"github.com/Hebi8/hebi8XC/internal/peers"
+	"github.com/Hebi8/hebi8XC/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
 const usage = `usage: h8c [--data-dir DIR] <command>

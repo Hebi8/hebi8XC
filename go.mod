@@ -1,4 +1,4 @@
-module hebi8xc
+module github.com/Hebi8/hebi8XC
 
 go 1.27.2
 

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"hebi8xc/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
 // Entry is one trusted key and the comment stored next to it.

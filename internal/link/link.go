@@ -14,8 +14,8 @@ import (
 	"math/big"
 	"time"
 
-	"hebi8xc/internal/roster"
-	"hebi8xc/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
 // Auth is what a node needs to authenticate itself and its peers.

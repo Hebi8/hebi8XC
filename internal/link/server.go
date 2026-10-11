@@ -10,7 +10,7 @@ import (
 	"os"
 	"time"
 
-	"hebi8xc/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/roster"
 )
 
 type peerKeyCtx struct{}

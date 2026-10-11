@@ -16,12 +16,12 @@ import (
 	"sync"
 	"time"
 
-	"hebi8xc/internal/discovery"
-	"hebi8xc/internal/identity"
-	"hebi8xc/internal/link"
-	"hebi8xc/internal/peers"
-	"hebi8xc/internal/roster"
-	"hebi8xc/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/discovery"
+	"github.com/Hebi8/hebi8XC/internal/identity"
+	"github.com/Hebi8/hebi8XC/internal/link"
+	"github.com/Hebi8/hebi8XC/internal/peers"
+	"github.com/Hebi8/hebi8XC/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
 const (

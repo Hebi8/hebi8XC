@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"hebi8xc/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
 func newKey(t *testing.T) ed25519.PublicKey {

@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"hebi8xc/internal/control"
-	"hebi8xc/internal/discovery"
-	"hebi8xc/internal/identity"
-	"hebi8xc/internal/peers"
-	"hebi8xc/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/control"
+	"github.com/Hebi8/hebi8XC/internal/discovery"
+	"github.com/Hebi8/hebi8XC/internal/identity"
+	"github.com/Hebi8/hebi8XC/internal/peers"
+	"github.com/Hebi8/hebi8XC/internal/roster"
 )
 
 // clock is the only source of time in these tests: nothing sleeps, rounds

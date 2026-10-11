@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"hebi8xc/internal/roster"
-	"hebi8xc/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
 type side struct {
