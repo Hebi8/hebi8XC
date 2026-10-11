@@ -191,7 +191,7 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 	}
 	var remote roster.Roster
 	if loggedIn {
-		remote, err = roster.OpenGitHub(filepath.Join(dir, node.GitHubRosterFile), gh, time.Now)
+		remote, err = openGitHubRoster(dir, account, func(warning error) { log.Warn(warning.Error()) })
 		if err != nil {
 			return fail(err)
 		}

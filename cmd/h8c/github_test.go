@@ -173,6 +173,47 @@ func TestFailedLoginLeavesTheNodeLoggedOut(t *testing.T) {
 	}
 }
 
+// A roster cache that cannot be read is replaced, with a warning. It stops
+// neither the login nor the node.
+func TestBrokenRosterCacheIsReplaced(t *testing.T) {
+	fakeGitHub(t)
+	cache := func(dir string) string { return filepath.Join(dir, node.GitHubRosterFile) }
+	spoil := func(dir string) {
+		t.Helper()
+		if err := os.WriteFile(cache(dir), []byte("{{{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	dir := t.TempDir()
+	spoil(dir)
+	out := h8c(t, dir, "login")
+	if !strings.Contains(out, "warning: ignoring the GitHub roster cache") ||
+		!strings.Contains(out, "Logged in as alice") || !strings.Contains(out, "The account lists 1 node keys.") {
+		t.Errorf("login over a broken cache:\n%s", out)
+	}
+	if got := h8c(t, dir, "roster"); strings.Contains(got, "warning") || !strings.Contains(got, "1 node keys") {
+		t.Errorf("roster after the login repaired the cache:\n%s", got)
+	}
+
+	spoil(dir)
+	if got := h8c(t, dir, "roster"); !strings.Contains(got, "warning: ignoring the GitHub roster cache") ||
+		!strings.Contains(got, "never fetched") {
+		t.Errorf("roster over a broken cache:\n%s", got)
+	}
+	var logs bytes.Buffer
+	n := startUp(t, dir, &logs)
+	if !strings.Contains(logs.String(), "ignoring the GitHub roster cache") {
+		t.Errorf("the node did not say that it ignored the cache:\n%s", &logs)
+	}
+	if err := n.RefreshRemote(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := h8c(t, dir, "roster"); strings.Contains(got, "warning") || !strings.Contains(got, "1 node keys") {
+		t.Errorf("roster after the node refreshed:\n%s", got)
+	}
+}
+
 func TestRosterListsKeysBySource(t *testing.T) {
 	fake := fakeGitHub(t)
 	laptop, desktop := t.TempDir(), t.TempDir()

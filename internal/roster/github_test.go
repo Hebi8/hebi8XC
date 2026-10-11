@@ -2,6 +2,7 @@ package roster
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,7 +45,7 @@ func newGitHub(t *testing.T) *githubFixture {
 // reopen loads the roster from its cache file, as a restart does.
 func (f *githubFixture) reopen() {
 	f.t.Helper()
-	g, err := OpenGitHub(f.path, f.fake.Client(), func() time.Time { return f.now })
+	g, err := OpenGitHub(f.path, f.fake.Client(), "alice", func() time.Time { return f.now })
 	if err != nil {
 		f.t.Fatal(err)
 	}
@@ -214,12 +215,35 @@ func TestGitHubCacheFileIsPrivateAndWhole(t *testing.T) {
 		t.Errorf("refresh left temporary files: %v", entries)
 	}
 
-	// A cache that does not parse is an error, not an empty roster.
-	if err := os.WriteFile(f.path, []byte(`{"account_id": 4242, "keys": [{"key": "ssh-ed25519 nope"}]}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := OpenGitHub(f.path, f.fake.Client(), time.Now); err == nil {
-		t.Error("OpenGitHub accepted a cache with a broken key")
+}
+
+// A cache file that cannot be read as a cache must not stop anything: it
+// counts as no cache, the reason is available, and a refresh repairs it.
+func TestGitHubRosterRecoversFromABrokenCache(t *testing.T) {
+	for name, content := range map[string]string{
+		"not JSON":   "{{{",
+		"broken key": `{"account_id": 4242, "login": "alice", "keys": [{"key": "ssh-ed25519 nope", "title": "hebi8xc: x (y)"}]}`,
+	} {
+		f := newGitHub(t)
+		key := newKey(t)
+		f.fake.AddKey(aliceID, KeyTitle("laptop", "a"), sshkey.Marshal(key))
+		if err := os.WriteFile(f.path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		f.reopen()
+		if err := f.Discarded(); err == nil || !strings.Contains(err.Error(), f.path) {
+			t.Errorf("%s: Discarded = %v, want the reason and the file", name, err)
+		}
+		if len(f.Entries(alice)) != 0 {
+			t.Errorf("%s: keys were taken from a broken cache", name)
+		}
+
+		f.refresh()
+		f.reopen()
+		if f.Discarded() != nil || !Trusts(f, alice, key) {
+			t.Errorf("%s: the refresh did not repair the cache", name)
+		}
 	}
 }
 
@@ -253,5 +277,140 @@ func TestUnionTrustsEitherRoster(t *testing.T) {
 	}
 	if !Trusts(both, alice, onGitHub) || !Trusts(both, alice, byHand) {
 		t.Error("a failed refresh changed what the union trusts")
+	}
+}
+
+func (f *githubFixture) requests() (lists, lookups int) {
+	return f.fake.Requests("GET /users/{login}/ssh_signing_keys"), f.fake.Requests("GET /user/{id}")
+}
+
+// cacheFile returns the cache as it is on disk.
+func (f *githubFixture) cacheFile() string {
+	f.t.Helper()
+	raw, err := os.ReadFile(f.path)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	return string(raw)
+}
+
+// squat renames alice's account and lets another account take the login
+// "alice" and register key as a node key of its own.
+func (f *githubFixture) squat(newLogin, key string) {
+	f.fake.Rename(aliceID, newLogin)
+	f.fake.AddAccount(99, "alice")
+	f.fake.AddKey(99, KeyTitle("laptop", "z"), key)
+}
+
+func TestGitHubRefreshIsTwoRequests(t *testing.T) {
+	f := newGitHub(t)
+	f.fake.AddKey(aliceID, KeyTitle("laptop", "a"), sshkey.Marshal(newKey(t)))
+	for i := 1; i <= 3; i++ { // the first uses the login from h8c login, the others the cached one
+		f.refresh()
+		if lists, lookups := f.requests(); lists != i || lookups != i {
+			t.Fatalf("after %d refreshes: %d key lists and %d id lookups, want %d of each", i, lists, lookups, i)
+		}
+	}
+}
+
+// The login changes hands at the worst moments of a refresh. Whenever the
+// keys were read under a login the account no longer has, they are thrown
+// away: the other account's key reaches neither the roster nor the cache.
+func TestGitHubRosterNeverTakesKeysOfTheOldLogin(t *testing.T) {
+	for name, moment := range map[string]string{
+		"renamed before the keys are listed":            "GET /users/{login}/ssh_signing_keys",
+		"renamed between listing the keys and the id":   "GET /user/{id}",
+		"renamed before the keys, on the first refresh": "",
+	} {
+		f := newGitHub(t)
+		own := newKey(t)
+		f.fake.AddKey(aliceID, KeyTitle("laptop", "a"), sshkey.Marshal(own))
+
+		squatterKey := newKey(t)
+		squatter := sshkey.Marshal(squatterKey)
+		if moment == "" {
+			f.squat("alice-new", squatter) // the roster only has the login from h8c login
+		} else {
+			f.refresh()
+			f.fake.Before(moment, func() { f.squat("alice-new", squatter) })
+		}
+		listsBefore, lookupsBefore := f.requests()
+		f.refresh()
+
+		if Trusts(f, alice, squatterKey) || strings.Contains(f.cacheFile(), squatter) {
+			t.Errorf("%s: the key of the account that took the login is trusted or cached", name)
+		}
+		if !Trusts(f, alice, own) {
+			t.Errorf("%s: the account's own key was lost", name)
+		}
+		if login, _ := f.Fetched(alice); login != "alice-new" {
+			t.Errorf("%s: login = %q, want alice-new", name, login)
+		}
+		// The first list is discarded: two more requests, four in all.
+		if lists, lookups := f.requests(); lists-listsBefore != 2 || lookups-lookupsBefore != 2 {
+			t.Errorf("%s: %d key lists and %d id lookups, want 2 of each",
+				name, lists-listsBefore, lookups-lookupsBefore)
+		}
+	}
+}
+
+// An old login that nobody took answers 404; the account is still found.
+func TestGitHubRosterFindsARenamedAccountWhoseOldLoginIsFree(t *testing.T) {
+	f := newGitHub(t)
+	own := newKey(t)
+	f.fake.AddKey(aliceID, KeyTitle("laptop", "a"), sshkey.Marshal(own))
+	f.refresh()
+	f.fake.Rename(aliceID, "alice-new")
+	f.refresh()
+	if login, _ := f.Fetched(alice); login != "alice-new" || !Trusts(f, alice, own) {
+		t.Errorf("after the rename: login %q, own key trusted %v", login, Trusts(f, alice, own))
+	}
+}
+
+// If the login moves again while the keys are read a second time, the
+// refresh gives up and the cache stays as it was.
+func TestGitHubRefreshGivesUpWhenTheLoginKeepsChanging(t *testing.T) {
+	f := newGitHub(t)
+	own := newKey(t)
+	f.fake.AddKey(aliceID, KeyTitle("laptop", "a"), sshkey.Marshal(own))
+	f.refresh()
+	before := f.cacheFile()
+
+	f.fake.Before("GET /user/{id}", func() { f.fake.Rename(aliceID, "alice-2") })
+	f.fake.Before("GET /user/{id}", func() { f.fake.Rename(aliceID, "alice-3") })
+	err := f.Refresh(context.Background(), alice)
+	if err == nil || !strings.Contains(err.Error(), "login changed") {
+		t.Fatalf("err = %v, want the refresh to give up", err)
+	}
+	if f.cacheFile() != before || !Trusts(f, alice, own) {
+		t.Error("a refresh that gave up changed the cache")
+	}
+
+	f.refresh() // things have settled
+	if login, _ := f.Fetched(alice); login != "alice-3" {
+		t.Errorf("login = %q, want alice-3", login)
+	}
+}
+
+// More signing keys than h8c reads is a failed refresh, not a roster made
+// of the first pages.
+func TestGitHubRosterRejectsATruncatedList(t *testing.T) {
+	f := newGitHub(t)
+	node := newKey(t)
+	f.fake.AddKey(aliceID, KeyTitle("laptop", "a"), sshkey.Marshal(node))
+	f.refresh()
+
+	for i := range 1000 {
+		f.fake.AddKey(aliceID, "other", fmt.Sprintf("ssh-rsa KEY%d", i))
+	}
+	late := newKey(t)
+	f.fake.AddKey(aliceID, KeyTitle("desktop", "b"), sshkey.Marshal(late))
+
+	err := f.Refresh(context.Background(), alice)
+	if err == nil || !strings.Contains(err.Error(), "more than 1000") {
+		t.Fatalf("err = %v, want a refusal to use a cut-off list", err)
+	}
+	if !Trusts(f, alice, node) || len(f.Entries(alice)) != 1 {
+		t.Error("the failed refresh changed the roster")
 	}
 }

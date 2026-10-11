@@ -84,7 +84,7 @@ func login(dir string, out io.Writer) error {
 	fmt.Fprintf(out, "Logged in as %s (id %d).\n", account.Login, account.ID)
 
 	// Fill the roster cache the way a node does, without the token.
-	remote, err := roster.OpenGitHub(filepath.Join(dir, node.GitHubRosterFile), gh, time.Now)
+	remote, err := openGitHubRoster(dir, account, func(warning error) { fmt.Fprintln(out, "warning:", warning) })
 	if err != nil {
 		return err
 	}
@@ -100,6 +100,20 @@ func login(dir string, out io.Writer) error {
 		fmt.Fprintln(out, "A node is running here without this login; restart h8c up to use it.")
 	}
 	return nil
+}
+
+// openGitHubRoster opens the roster cache of a logged-in data directory. A
+// cache file that cannot be used is reported through warn and otherwise
+// treated as missing; the next refresh replaces it.
+func openGitHubRoster(dir string, account github.Account, warn func(error)) (*roster.GitHub, error) {
+	remote, err := roster.OpenGitHub(filepath.Join(dir, node.GitHubRosterFile), gh, account.Login, time.Now)
+	if err != nil {
+		return nil, err
+	}
+	if err := remote.Discarded(); err != nil {
+		warn(err)
+	}
+	return remote, nil
 }
 
 // accountLine describes the GitHub login of a data directory for h8c id.
@@ -130,7 +144,7 @@ func showRoster(dir string, args []string, out io.Writer) error {
 		// done. Without one, the cache file is refreshed for the next start.
 		err := control.Dial(filepath.Join(dir, node.ControlSocket)).Post(context.Background(), "/v1/roster/refresh")
 		if errors.Is(err, control.ErrNotRunning) {
-			remote, openErr := roster.OpenGitHub(filepath.Join(dir, node.GitHubRosterFile), gh, time.Now)
+			remote, openErr := openGitHubRoster(dir, account, func(error) {})
 			if openErr != nil {
 				return openErr
 			}
@@ -149,7 +163,7 @@ func showRoster(dir string, args []string, out io.Writer) error {
 	if !loggedIn {
 		fmt.Fprintln(out, "github  not logged in")
 	} else {
-		cache, err := roster.OpenGitHub(filepath.Join(dir, node.GitHubRosterFile), gh, time.Now)
+		cache, err := openGitHubRoster(dir, account, func(warning error) { fmt.Fprintln(out, "warning:", warning) })
 		if err != nil {
 			return err
 		}

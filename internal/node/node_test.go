@@ -65,6 +65,7 @@ type testNode struct {
 	// and the remote roster that reads from it.
 	github  *githubtest.Server
 	account int64
+	login   string
 	remote  *roster.GitHub
 }
 
@@ -101,7 +102,7 @@ func (tn *testNode) boot(listen string) {
 	tn.addr = ln.Addr().String()
 	cfg := Config{User: "me"}
 	if tn.github != nil {
-		tn.remote, err = roster.OpenGitHub(filepath.Join(tn.dir, GitHubRosterFile), tn.github.Client(), tn.clock.now)
+		tn.remote, err = roster.OpenGitHub(filepath.Join(tn.dir, GitHubRosterFile), tn.github.Client(), tn.login, tn.clock.now)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -489,9 +490,9 @@ func TestHelloFromAPeerEndsItsBackoff(t *testing.T) {
 
 // loggedInNode starts a node that is logged in to account on the fake
 // GitHub, with its key registered there the way h8c login registers it.
-func loggedInNode(t *testing.T, c *clock, fake *githubtest.Server, account int64) *testNode {
+func loggedInNode(t *testing.T, c *clock, fake *githubtest.Server, account int64, login string) *testNode {
 	t.Helper()
-	tn := &testNode{t: t, dir: t.TempDir(), clock: c, github: fake, account: account}
+	tn := &testNode{t: t, dir: t.TempDir(), clock: c, github: fake, account: account, login: login}
 	tn.boot("127.0.0.1:0")
 	fake.AddKey(account, roster.KeyTitle(tn.id.Name, tn.id.ID), sshkey.Marshal(tn.id.Public()))
 	return tn
@@ -511,7 +512,7 @@ func TestNodesOfOneGitHubAccountFindEachOther(t *testing.T) {
 	c := newClock()
 	fake := githubtest.New(t)
 	fake.AddAccount(4242, "alice")
-	a, b := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 4242)
+	a, b := loggedInNode(t, c, fake, 4242, "alice"), loggedInNode(t, c, fake, 4242, "alice")
 	if len(a.roster.Entries()) != 0 || len(b.roster.Entries()) != 0 {
 		t.Fatal("the local rosters should be empty in this test")
 	}
@@ -550,7 +551,7 @@ func TestNodeOfAnotherGitHubAccountIsRefused(t *testing.T) {
 	fake := githubtest.New(t)
 	fake.AddAccount(4242, "alice")
 	fake.AddAccount(7, "bob")
-	a, b := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 7)
+	a, b := loggedInNode(t, c, fake, 4242, "alice"), loggedInNode(t, c, fake, 7, "bob")
 	a.static = []string{b.addr}
 	b.static = []string{a.addr}
 	a.refreshRemote()
@@ -571,7 +572,7 @@ func TestLocalKeysAndGitHubKeysAreBothTrusted(t *testing.T) {
 	c := newClock()
 	fake := githubtest.New(t)
 	fake.AddAccount(4242, "alice")
-	online, offline := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 4242)
+	online, offline := loggedInNode(t, c, fake, 4242, "alice"), loggedInNode(t, c, fake, 4242, "alice")
 	fake.RemoveKey(4242, sshkey.Marshal(offline.id.Public())) // it never got to register
 	online.refreshRemote()
 	fake.SetDown(true)
@@ -599,7 +600,7 @@ func TestRemoteRosterFailureKeepsPeers(t *testing.T) {
 	c := newClock()
 	fake := githubtest.New(t)
 	fake.AddAccount(4242, "alice")
-	a, b := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 4242)
+	a, b := loggedInNode(t, c, fake, 4242, "alice"), loggedInNode(t, c, fake, 4242, "alice")
 	a.static = []string{b.addr}
 	a.refreshRemote()
 	b.refreshRemote()
