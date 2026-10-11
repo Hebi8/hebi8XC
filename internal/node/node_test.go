@@ -8,6 +8,7 @@ import (
 	"net"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,10 +16,13 @@ import (
 
 	"github.com/Hebi8/hebi8XC/internal/control"
 	"github.com/Hebi8/hebi8XC/internal/discovery"
+	"github.com/Hebi8/hebi8XC/internal/github"
+	"github.com/Hebi8/hebi8XC/internal/github/githubtest"
 	"github.com/Hebi8/hebi8XC/internal/identity"
 	"github.com/Hebi8/hebi8XC/internal/link"
 	"github.com/Hebi8/hebi8XC/internal/peers"
 	"github.com/Hebi8/hebi8XC/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
 // clock is the only source of time in these tests: nothing sleeps, rounds
@@ -56,6 +60,12 @@ type testNode struct {
 	roster *roster.File
 	static []string
 	extra  []discovery.Source
+
+	// A node that is logged in to GitHub has an account on a fake GitHub
+	// and the remote roster that reads from it.
+	github  *githubtest.Server
+	account int64
+	remote  *roster.GitHub
 }
 
 func startNode(t *testing.T, c *clock, extra ...discovery.Source) *testNode {
@@ -89,10 +99,19 @@ func (tn *testNode) boot(listen string) {
 		t.Fatal(err)
 	}
 	tn.addr = ln.Addr().String()
+	cfg := Config{User: "me"}
+	if tn.github != nil {
+		tn.remote, err = roster.OpenGitHub(filepath.Join(tn.dir, GitHubRosterFile), tn.github.Client(), tn.clock.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cfg = Config{User: github.Account{ID: tn.account}.User(), Remote: tn.remote}
+	}
 	tn.Node, err = New(Config{
 		Identity: tn.id,
-		User:     "me",
-		Roster:   tn.roster,
+		User:     cfg.User,
+		Local:    tn.roster,
+		Remote:   cfg.Remote,
 		Table:    table,
 		Sources: append([]discovery.Source{
 			discovery.Func(discovery.Remembered, table.Addrs),
@@ -465,5 +484,143 @@ func TestHelloFromAPeerEndsItsBackoff(t *testing.T) {
 	a.round() // 60s: would still be backing off
 	if p := a.peer(b); !p.Online || len(p.Addrs) != 1 || !p.Addrs[0].LastOK.Equal(c.now()) {
 		t.Errorf("a did not probe b right after b's hello: %+v", p)
+	}
+}
+
+// loggedInNode starts a node that is logged in to account on the fake
+// GitHub, with its key registered there the way h8c login registers it.
+func loggedInNode(t *testing.T, c *clock, fake *githubtest.Server, account int64) *testNode {
+	t.Helper()
+	tn := &testNode{t: t, dir: t.TempDir(), clock: c, github: fake, account: account}
+	tn.boot("127.0.0.1:0")
+	fake.AddKey(account, roster.KeyTitle(tn.id.Name, tn.id.ID), sshkey.Marshal(tn.id.Public()))
+	return tn
+}
+
+func (tn *testNode) refreshRemote() {
+	tn.t.Helper()
+	if err := tn.RefreshRemote(context.Background()); err != nil {
+		tn.t.Fatal(err)
+	}
+}
+
+// Two machines logged in to the same GitHub account connect without anyone
+// copying a key. Taking a machine's key off the account cuts it off at the
+// next refresh of the others.
+func TestNodesOfOneGitHubAccountFindEachOther(t *testing.T) {
+	c := newClock()
+	fake := githubtest.New(t)
+	fake.AddAccount(4242, "alice")
+	a, b := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 4242)
+	if len(a.roster.Entries()) != 0 || len(b.roster.Entries()) != 0 {
+		t.Fatal("the local rosters should be empty in this test")
+	}
+	a.static = []string{b.addr}
+
+	a.round()
+	if len(a.peers()) != 0 {
+		t.Fatal("nodes connected before either had read the roster")
+	}
+
+	a.refreshRemote()
+	b.refreshRemote()
+	a.round()
+	b.round()
+	if !a.peer(b).Online || !b.peer(a).Online {
+		t.Fatal("nodes of the same account did not connect")
+	}
+
+	// a's key is deleted on GitHub. b learns of it through "h8c roster
+	// refresh", which is this call on the control socket.
+	fake.RemoveKey(4242, sshkey.Marshal(a.id.Public()))
+	ctx := context.Background()
+	if _, _, err := a.hello(ctx, b.addr); err != nil {
+		t.Fatalf("hello before b refreshed: %v", err)
+	}
+	if err := control.Dial(filepath.Join(b.dir, ControlSocket)).Post(ctx, "/v1/roster/refresh"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := a.hello(ctx, b.addr); !errors.Is(err, link.ErrRejected) {
+		t.Errorf("hello after b refreshed: err = %v, want ErrRejected", err)
+	}
+}
+
+func TestNodeOfAnotherGitHubAccountIsRefused(t *testing.T) {
+	c := newClock()
+	fake := githubtest.New(t)
+	fake.AddAccount(4242, "alice")
+	fake.AddAccount(7, "bob")
+	a, b := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 7)
+	a.static = []string{b.addr}
+	b.static = []string{a.addr}
+	a.refreshRemote()
+	b.refreshRemote()
+	a.round()
+	b.round()
+	if len(a.peers()) != 0 || len(b.peers()) != 0 {
+		t.Errorf("nodes of different accounts became peers: %+v / %+v", a.peers(), b.peers())
+	}
+	if a.status().NetworkTag == b.status().NetworkTag {
+		t.Error("different accounts share a network tag")
+	}
+}
+
+// A machine without internet access is added by hand on the others, and it
+// adds them by hand: the local file and the GitHub roster are one roster.
+func TestLocalKeysAndGitHubKeysAreBothTrusted(t *testing.T) {
+	c := newClock()
+	fake := githubtest.New(t)
+	fake.AddAccount(4242, "alice")
+	online, offline := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 4242)
+	fake.RemoveKey(4242, sshkey.Marshal(offline.id.Public())) // it never got to register
+	online.refreshRemote()
+	fake.SetDown(true)
+	if err := offline.RefreshRemote(context.Background()); err == nil {
+		t.Fatal("refresh succeeded without GitHub")
+	}
+
+	offline.static = []string{online.addr}
+	offline.round()
+	if len(offline.peers()) != 0 {
+		t.Fatal("connected before the keys were added by hand")
+	}
+	online.trust(offline)
+	offline.trust(online)
+	offline.round()
+	online.round()
+	if !offline.peer(online).Online || !online.peer(offline).Online {
+		t.Error("hand-added keys were not enough next to the GitHub roster")
+	}
+}
+
+// When GitHub cannot be reached the node keeps working from the cache, and
+// the refresh says so instead of pretending.
+func TestRemoteRosterFailureKeepsPeers(t *testing.T) {
+	c := newClock()
+	fake := githubtest.New(t)
+	fake.AddAccount(4242, "alice")
+	a, b := loggedInNode(t, c, fake, 4242), loggedInNode(t, c, fake, 4242)
+	a.static = []string{b.addr}
+	a.refreshRemote()
+	b.refreshRemote()
+
+	fake.SetDown(true)
+	ctx := context.Background()
+	err := control.Dial(filepath.Join(a.dir, ControlSocket)).Post(ctx, "/v1/roster/refresh")
+	if err == nil || !strings.Contains(err.Error(), "using the 2 keys fetched") {
+		t.Fatalf("refresh without GitHub: err = %v, want a failure that names the cache", err)
+	}
+	a.restart() // the cache file carries the keys over
+	a.round()
+	if !a.peer(b).Online {
+		t.Error("peers were lost while GitHub was unreachable")
+	}
+}
+
+func TestRemoteRefreshNeedsALogin(t *testing.T) {
+	a := startNode(t, newClock())
+	err := control.Dial(filepath.Join(a.dir, ControlSocket)).Post(context.Background(), "/v1/roster/refresh")
+	if err == nil || !strings.Contains(err.Error(), ErrNoRemote.Error()) {
+		t.Errorf("err = %v, want %v", err, ErrNoRemote)
 	}
 }

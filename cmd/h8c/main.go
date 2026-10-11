@@ -174,7 +174,7 @@ func up(dir string, args []string) error {
 	n, err := node.New(node.Config{
 		Identity: ident,
 		User:     *userID,
-		Roster:   trusted,
+		Local:    trusted,
 		Table:    table,
 		Sources:  sources,
 		Listener: ln,

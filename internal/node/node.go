@@ -40,11 +40,23 @@ const (
 	// does not answer. The gap doubles from Interval with every failure.
 	maxBackoff = 5 * time.Minute
 
+	// RemoteInterval is the time between refreshes of the remote roster.
+	// Reading it costs two requests out of the 60 per hour that GitHub
+	// allows an IP address without a token, and all nodes behind one
+	// router share that allowance.
+	RemoteInterval = 15 * time.Minute
+
 	// Files in the data directory, next to the identity.
-	RosterFile    = "trusted_keys"
-	PeersFile     = "peers.json"
-	ControlSocket = "control.sock"
+	RosterFile       = "trusted_keys"
+	AccountFile      = "account.json"
+	GitHubRosterFile = "github_keys.json"
+	PeersFile        = "peers.json"
+	ControlSocket    = "control.sock"
 )
+
+// ErrNoRemote is the answer to a remote roster refresh on a node that has
+// no remote roster.
+var ErrNoRemote = errors.New("this node is not logged in to GitHub")
 
 // Info is what two nodes tell each other in POST /v1/hello. Port is where
 // the sender listens, so the receiver can call back.
@@ -67,7 +79,11 @@ type Status struct {
 type Config struct {
 	Identity *identity.Identity
 	User     string
-	Roster   roster.Roster
+	// Local is re-read every round; it is a file on this machine. Remote
+	// is fetched over the network every RemoteInterval and may be nil.
+	// A key in either one is trusted.
+	Local    roster.Roster
+	Remote   roster.Roster
 	Table    *peers.Table
 	Sources  []discovery.Source
 	Listener net.Listener // peer link, plain TCP; the node adds TLS
@@ -108,7 +124,11 @@ func New(cfg Config) (*Node, error) {
 		retries:  make(map[string]retry),
 		reported: make(map[string]string),
 	}
-	auth := &link.Auth{Key: cfg.Identity.Key, Roster: cfg.Roster, User: cfg.User}
+	trusted := cfg.Local
+	if cfg.Remote != nil {
+		trusted = roster.Union(cfg.Local, cfg.Remote)
+	}
+	auth := &link.Auth{Key: cfg.Identity.Key, Roster: trusted, User: cfg.User}
 	var err error
 	if n.client, err = link.NewClient(auth); err != nil {
 		return nil, err
@@ -132,14 +152,20 @@ func New(cfg Config) (*Node, error) {
 	// the caller is refused from this point on. The round that follows only
 	// brings the peer table up to date.
 	ctlMux.HandleFunc("POST /v1/refresh", func(w http.ResponseWriter, r *http.Request) {
-		if err := cfg.Roster.Refresh(r.Context(), cfg.User); err != nil {
+		if err := cfg.Local.Refresh(r.Context(), cfg.User); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		select {
-		case n.kick <- struct{}{}:
-		default:
+		n.roundNow()
+	})
+	// The same for the remote roster: the answer is sent when the fetch is
+	// over, and says so if it failed.
+	ctlMux.HandleFunc("POST /v1/roster/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if err := n.RefreshRemote(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
 		}
+		n.roundNow()
 	})
 	n.ctlSrv = &http.Server{Handler: ctlMux}
 	return n, nil
@@ -168,10 +194,14 @@ func (n *Node) Close() {
 	}
 }
 
-// Run serves and runs discovery rounds until ctx is done.
+// Run serves, keeps the remote roster fresh and runs discovery rounds until
+// ctx is done.
 func (n *Node) Run(ctx context.Context) {
 	n.Start()
 	defer n.Close()
+	if n.cfg.Remote != nil {
+		go n.keepRemoteFresh(ctx)
+	}
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
 	for {
@@ -185,12 +215,53 @@ func (n *Node) Run(ctx context.Context) {
 	}
 }
 
-// Round refreshes the roster, probes the candidate addresses that are due,
+// keepRemoteFresh refreshes the remote roster at start and then every
+// RemoteInterval. It runs beside the rounds, so a slow or unreachable
+// GitHub never delays a heartbeat. Until the first refresh is done, and
+// whenever one fails, the roster's cache is what counts.
+func (n *Node) keepRemoteFresh(ctx context.Context) {
+	ticker := time.NewTicker(RemoteInterval)
+	defer ticker.Stop()
+	for {
+		if err := n.RefreshRemote(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			n.log.Warn(err.Error())
+		} else {
+			n.roundNow()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// RefreshRemote fetches the remote roster now and returns when that is
+// done. Keys it no longer lists are refused from then on.
+func (n *Node) RefreshRemote(ctx context.Context) error {
+	if n.cfg.Remote == nil {
+		return ErrNoRemote
+	}
+	return n.cfg.Remote.Refresh(ctx, n.cfg.User)
+}
+
+// roundNow asks Run for a round without waiting for the next tick.
+func (n *Node) roundNow() {
+	select {
+	case n.kick <- struct{}{}:
+	default:
+	}
+}
+
+// Round re-reads the local roster, probes the candidate addresses that are due,
 // records the nodes that answered and marks the silent ones offline. It must
 // not be called concurrently with itself.
 func (n *Node) Round(ctx context.Context) {
-	if err := n.cfg.Roster.Refresh(ctx, n.cfg.User); err != nil {
-		n.log.Warn("roster refresh failed, using the cached keys", "err", err)
+	if err := n.cfg.Local.Refresh(ctx, n.cfg.User); err != nil {
+		n.log.Warn("local roster not re-read, using the keys already loaded", "err", err)
 	}
 
 	targets := n.targets(ctx)
