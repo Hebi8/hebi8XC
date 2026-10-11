@@ -2,8 +2,13 @@ package main
 
 import (
 	"bytes"
+	"errors"
+	"os"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/Hebi8/hebi8XC/internal/datadir"
 )
 
 func h8c(t *testing.T, dir string, args ...string) string {
@@ -60,5 +65,43 @@ func TestPeersWithoutARunningNode(t *testing.T) {
 	err := run([]string{"--data-dir", t.TempDir(), "peers"}, &out)
 	if err == nil || !strings.Contains(err.Error(), "not running") {
 		t.Errorf("err = %v, want a hint that the node is not running", err)
+	}
+}
+
+func TestDataDirectoryIsTightened(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows has no Unix permission bits")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	h8c(t, dir, "id")
+	st, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := st.Mode().Perm(); perm != 0o700 {
+		t.Errorf("data directory mode = %o after h8c id, want 700", perm)
+	}
+}
+
+// A second node on the same data directory must stop before it touches the
+// first one's control socket.
+func TestUpRefusesALockedDataDirectory(t *testing.T) {
+	dir := t.TempDir()
+	unlock, err := datadir.Lock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	var out bytes.Buffer
+	err = run([]string{"--data-dir", dir, "up", "--listen", "127.0.0.1:0", "--discover", "none"}, &out)
+	if !errors.Is(err, datadir.ErrLocked) {
+		t.Fatalf("err = %v, want ErrLocked", err)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("the refused node left files behind: %v", entries)
 	}
 }

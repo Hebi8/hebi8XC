@@ -17,13 +17,10 @@ import (
 // ErrNotRunning means nothing is listening on the control socket.
 var ErrNotRunning = errors.New("the node is not running (start it with: h8c up)")
 
-// Listen opens the control socket at path. A socket left behind by a dead
-// node is replaced; a live one is an error.
+// Listen opens the control socket at path, replacing one left behind by a
+// dead node. The caller must hold the data directory's lock, which is what
+// makes the leftover known to be dead.
 func Listen(path string) (net.Listener, error) {
-	if conn, err := net.Dial("unix", path); err == nil {
-		conn.Close()
-		return nil, fmt.Errorf("a node is already running on %s", path)
-	}
 	os.Remove(path)
 	ln, err := net.Listen("unix", path)
 	if err != nil {

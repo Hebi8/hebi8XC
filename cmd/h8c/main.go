@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/control"
+	"github.com/Hebi8/hebi8XC/internal/datadir"
 	"github.com/Hebi8/hebi8XC/internal/discovery"
 	"github.com/Hebi8/hebi8XC/internal/identity"
 	"github.com/Hebi8/hebi8XC/internal/node"
@@ -67,16 +68,25 @@ func run(args []string, out io.Writer) error {
 		return errors.New("missing command\n" + usage)
 	}
 	switch args[0] {
-	case "up":
-		return up(*dataDir, args[1:])
 	case "peers":
 		return listPeers(*dataDir, out)
+	case "up", "id", "trust":
+	default:
+		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
+	}
+
+	// The remaining commands read or write files in the data directory.
+	if err := datadir.Ensure(*dataDir); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "up":
+		return up(*dataDir, args[1:])
 	case "id":
 		return showID(*dataDir, out)
-	case "trust":
+	default:
 		return trust(*dataDir, args[1:], out)
 	}
-	return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 }
 
 func up(dir string, args []string) error {
@@ -103,6 +113,14 @@ func up(dir string, args []string) error {
 		// Windows reports DOMAIN\name.
 		*userID = u.Username[strings.LastIndex(u.Username, `\`)+1:]
 	}
+
+	// One node per data directory. Holding the lock is also what allows
+	// control.Listen to clear a socket left behind by a crash.
+	unlock, err := datadir.Lock(dir)
+	if err != nil {
+		return fmt.Errorf("%s: %w", dir, err)
+	}
+	defer unlock()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ident, err := identity.Load(dir)
@@ -210,9 +228,6 @@ func showID(dir string, out io.Writer) error {
 func trust(dir string, args []string, out io.Writer) error {
 	if len(args) == 0 {
 		return errors.New("want: h8c trust add|list|remove")
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
 	}
 	trusted, err := roster.OpenFile(filepath.Join(dir, node.RosterFile))
 	if err != nil {
