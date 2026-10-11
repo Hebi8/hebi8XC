@@ -22,6 +22,8 @@ GOOS=darwin go build ./... && GOOS=windows go build ./...   # must keep building
 - Use TLS from the standard library. Do not write cryptographic protocols.
 - Never send a token or private key to a peer, and never put one in a discovery announcement.
 - Tests are deterministic: inject the clock, use fake sources and `t.TempDir()`, drive rounds by hand, never sleep, touch no network beyond loopback.
+- Test data and documentation use made-up values only: `100.64.0.x` for Tailscale, `192.168.1.2x` for the LAN, `alice` as the user. No real address, host name, user name or node id of any machine, also not in pasted output.
+- No token is written to disk or to a log.
 - Keep dependencies few; say why when adding one.
 - Do not install `h8c` as a system service or touch other services on the machine when testing. Use temporary data directories and foreground processes, and clean up.
 - Commits follow Conventional Commits.

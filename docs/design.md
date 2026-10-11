@@ -2,7 +2,7 @@
 
 hebi8XC connects the machines of one user. Each machine runs a node. There is no hub and no server: nodes connect pairwise.
 
-This document covers the first step: discovery, handshake, node list. Session indexing comes later as routes on the same connection.
+This document covers discovery, the handshake, the roster and the node list. Session indexing comes later as routes on the same connection.
 
 ## Discovery and authentication are separate
 
@@ -22,7 +22,7 @@ An mDNS announcement holds the node id (as instance name and host name), the por
 
 mDNS runs on IPv4 on the one interface the OS routes multicast through, so a machine with many virtual bridges announces one address.
 
-The **user id** is `--user`, defaulting to the OS user name. It will become the GitHub account.
+The **user id** names the user in the roster and in the network tag. On a node that is logged in it is `github:<numeric account id>`; the id, unlike the login, never changes. On a node that is not, it is `--user`, defaulting to the OS user name. The two kinds have different tags, so they do not find each other over mDNS.
 
 ## Identity
 
@@ -46,7 +46,33 @@ type Roster interface {
 }
 ```
 
-This step ships `roster.File`: the file `trusted_keys`, one key per line, managed with `h8c trust`. The node calls `Refresh` at the start of every discovery round, and at once when `h8c trust` tells it to: a removed key is refused by the time `h8c trust remove` returns. The file is replaced in one step. The GitHub roster will implement the same interface; see [github-roster.md](github-roster.md).
+A node trusts a key that is in either of two rosters:
+
+- `roster.File`, the local one: the file `trusted_keys`, one key per line, managed with `h8c trust`. It is for machines that cannot reach GitHub. The node re-reads it at the start of every discovery round, and at once when `h8c trust` tells it to: a removed key is refused by the time `h8c trust remove` returns. The file is replaced in one step.
+- `roster.GitHub`, on a node that is logged in: the SSH signing keys of the GitHub account.
+
+### GitHub roster
+
+`h8c login` runs the device flow of the project's GitHub App, asks GitHub which account the token belongs to, and registers the node's public key on it as an SSH signing key titled `hebi8xc: <node name> (<node id>)`, unless the key is already there. It stores the account's numeric id and login in `account.json`. The token and the refresh token are used in memory and thrown away; nothing later needs one. Running it again changes nothing.
+
+A refresh makes two requests, both without a token:
+
+1. `GET /user/{id}` turns the stored id into the current login. This is done every time: keys can only be listed by login, and after a rename the old login may belong to someone else.
+2. `GET /users/{login}/ssh_signing_keys` lists the account's signing keys.
+
+Of those, the node keys are the Ed25519 keys whose title starts with `hebi8xc: `. The keys the user signs commits with have other titles and are not nodes. The result is written to `github_keys.json` (mode 600), replaced in one step, and loaded from there at start.
+
+The node refreshes at start and then every 15 minutes, beside the discovery rounds, so GitHub being slow does not delay a heartbeat. Without a token GitHub allows 60 requests per hour per IP address, shared by all nodes behind one router, and a conditional request that changes nothing still counts; 15 minutes is 8 requests per node and hour. `h8c roster refresh` makes the running node refresh now and returns when it has: a key that is no longer listed is refused from then on.
+
+When a refresh fails, for lack of network or of requests, the node keeps the cached keys and logs how old they are. The cache does not expire.
+
+Consequences:
+
+- A machine that logs in is accepted by the nodes already running at their next refresh, at most 15 minutes later.
+- Removing a machine means deleting its key on GitHub, then refreshing the others. GitHub's public list still showed a deleted key more than 20 seconds later in a test, so the removal is not immediate even with a refresh.
+- Whoever can add a signing key to the account can add a node.
+
+Facts and sources are in [github-roster.md](github-roster.md).
 
 No token or other secret is ever sent to a peer.
 
@@ -79,7 +105,7 @@ One entry per node id, stored in `peers.json`: id, name, public key, known addre
 
 ## Control interface
 
-The running node listens on the Unix socket `control.sock` in the data directory (mode 600) and speaks HTTP: `GET /v1/status`, `GET /v1/peers`, `POST /v1/refresh` (reload the roster, answer, then run a round). `h8c peers` and `h8c trust` use it; the MCP server and desktop client will too.
+The running node listens on the Unix socket `control.sock` in the data directory (mode 600) and speaks HTTP: `GET /v1/status`, `GET /v1/peers`, `POST /v1/refresh` (re-read the local roster, answer, then run a round) and `POST /v1/roster/refresh` (fetch the GitHub roster, answer, then run a round). `h8c peers`, `h8c trust` and `h8c roster refresh` use it; the MCP server and desktop client will too.
 
 One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `LockFileEx` on Windows) and holds it while it runs; a second `h8c up` on the same directory exits. A socket left behind by a crash is removed by the next node, after it has the lock.
 
@@ -87,12 +113,14 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 
 ## Data directory
 
-`--data-dir`, default `hebi8xc` under `os.UserConfigDir()`: `~/.config/hebi8xc` on Linux, `~/Library/Application Support/hebi8xc` on macOS, `%AppData%\hebi8xc` on Windows. `h8c up`, `id` and `trust` set the directory to mode 700 every time, also when it already existed.
+`--data-dir`, default `hebi8xc` under `os.UserConfigDir()`: `~/.config/hebi8xc` on Linux, `~/Library/Application Support/hebi8xc` on macOS, `%AppData%\hebi8xc` on Windows. Every command except `h8c peers` sets the directory to mode 700 every time, also when it already existed.
 
 | File | Content |
 | --- | --- |
 | `node.json`, `node.key` | Identity |
 | `trusted_keys` | Local roster |
+| `account.json` | GitHub account the node is logged in to: id and login |
+| `github_keys.json` | Cache of the GitHub roster |
 | `peers.json` | Node list |
 | `control.sock` | Control socket, while the node runs |
 | `lock` | Held by the running node |
@@ -103,7 +131,9 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 - The Tailscale source only tries port 4892.
 - A peer that comes back is seen at once when it can reach us, because it says hello. When only we can reach it, its address may still be backing off, for up to 5 minutes.
 - Any key in the roster may claim any node id, and any number of them: the node list has no size limit. All keys belong to the same user, so this is not a boundary today.
-- Two `h8c trust` commands at the same moment are not coordinated; the later write wins. The file becomes a cache of the GitHub roster in the next step.
+- Two `h8c trust` commands at the same moment are not coordinated; the later write wins.
+- A node only notices a login made while it runs after a restart.
+- The token of a login is not revoked when `h8c login` is done; it expires after 8 hours.
 - A first start that races another one may fail once with an incomplete identity and works when run again.
 - A refusal is recognized by the TLS alert the other node sends. If the alert is lost on the way, the failure counts as a broken connection and the "trusted but refused" hint is not logged. On Linux the alert arrived in every test.
 - On Windows the private key file relies on the profile directory's ACL; there are no mode bits. The Windows code is compiled but has not been run.

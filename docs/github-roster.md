@@ -1,8 +1,8 @@
 # GitHub as the roster: verified facts
 
-Next step: replace the local `trusted_keys` file with the SSH signing keys registered on the user's GitHub account. Each node registers its public key as a signing key once; every node reads the account's signing keys as its roster.
+The roster of a logged-in node is the list of SSH signing keys on the user's GitHub account: `h8c login` registers the node's public key there once, and every node reads the account's signing keys. How `h8c` does this is in [design.md](design.md#github-roster). This file records what was checked about GitHub and where it is documented.
 
-Everything below was checked on 2026-10-11 against the linked GitHub documentation. "Tested" means the call was also made that day, read-only, against github.com. Nothing was written to any account.
+Everything below was checked on 2026-10-11 against the linked GitHub documentation. "Tested" means the call was also made that day against github.com. The tests that write, registering and deleting a signing key, were done with the project's GitHub App on its owner's account, with a key made for the test.
 
 ## The app
 
@@ -14,7 +14,7 @@ Login goes through a GitHub App, not an OAuth App.
 | App ID | 5273992 |
 | Client ID | `Iv23liTrm1TRc0ZbMP1g` |
 
-The client ID is a public value and will be compiled into `h8c`. According to the owner, Device Flow is enabled and the account permission "SSH signing keys" is set to read and write. Neither setting was checked from here.
+The client ID is a public value and is compiled into `h8c`. Device Flow is enabled and the account permission "SSH signing keys" is set to read and write; both were tested, see below.
 
 ## Device flow for a GitHub App
 
@@ -24,6 +24,7 @@ Source: [Generating a user access token for a GitHub App](https://docs.github.co
 2. The user opens the verification URI in any browser and types the `user_code`.
 3. The app polls `POST https://github.com/login/oauth/access_token` with `client_id`, `device_code` and `grant_type=urn:ietf:params:oauth:grant-type:device_code`, no faster than `interval`.
 
+- Tested: the flow works with this app and ends in a token that starts with `ghu_`.
 - **Only the client ID is needed.** The parameter tables of both requests list no client secret. The one `scope` value accepted is `offline_access`, which asks for an expiring token with a refresh token even if the app has expiry switched off: "No other scopes are supported for GitHub Apps."
 - Device flow is off by default: "Before you can use the device flow, you must first enable it in your app's settings." Otherwise polling returns `device_flow_disabled`.
 - Polling errors to handle: `authorization_pending` (keep polling), `slow_down` (add 5 s to the interval), `expired_token`, `access_denied`, `incorrect_device_code`, `incorrect_client_credentials`, `unsupported_grant_type`.
@@ -43,7 +44,8 @@ What a GitHub App's token may do is set by permissions, not scopes. A user acces
 | Git SSH keys | write | `POST /user/keys`, `DELETE /user/keys/{id}` |
 | Git SSH keys | read | `GET /user/keys`, `GET /user/keys/{id}`, `GET /users/{username}/keys` |
 
-- Registering a node key needs "SSH signing keys" with write access. "Git SSH keys" is a separate permission and covers authentication keys; the app must not ask for it.
+- Registering a node key needs "SSH signing keys" with write access. "Git SSH keys" is a separate permission and covers authentication keys; the app does not have it.
+- Tested with a token of the app: `POST /user/ssh_signing_keys` returns 201, and `GET /user/keys` returns 403. The app cannot touch authentication keys.
 - All of these accept user access tokens only, except `GET /users/{username}/keys`, which also accepts installation tokens.
 
 ## Who can log in
@@ -54,6 +56,13 @@ Source: [Making a GitHub App public or private](https://docs.github.com/en/apps/
 - Private: "it can only be installed on the account that owns the app", and for an app owned by an organization, "Only members of the organization that owns it can authorize it."
 
 While the app is private, only members of `Hebi8` can log in with it.
+
+## Finding an account by its id
+
+Source: [Get a user using their ID](https://docs.github.com/en/rest/users/users?apiVersion=2022-11-28#get-a-user-using-their-id): `GET /user/{account_id}` "takes their durable user ID instead of their login, which can change over time."
+
+- Tested without credentials: it returns 200 with `id` and `login`.
+- There is no documented endpoint that lists signing keys by id. `GET /user/{account_id}/ssh_signing_keys` answered 200 in a test, but it is not in the documentation and `h8c` does not use it. A refresh therefore takes two requests: the id to the login, then the keys of that login.
 
 ## SSH signing key endpoints
 
@@ -71,6 +80,8 @@ Source: [REST API endpoints for SSH signing keys](https://docs.github.com/en/res
 - The scope column does not apply to the GitHub App above; its tokens are governed by the permissions in the previous section. It matters for `gh`, which logs in as an OAuth App.
 - Tested with a `gh` token that lacks these scopes: `GET /user/ssh_signing_keys` returns 404, and the response header `X-Accepted-OAuth-Scopes` lists `admin:ssh_signing_key, read:ssh_signing_key, write:ssh_signing_key`.
 - The `*:ssh_signing_key` scopes are named on the REST page but missing from the [scopes table for OAuth Apps](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps) (checked the same day).
+- Tested: a key registered with `POST` is in the public list of the next section at once.
+- Tested: `DELETE` returns 204, but the public list still showed the key more than 20 seconds later; it was gone within a few minutes. Removing a machine on GitHub does not take effect at once.
 - CLI equivalent for a manual setup: `gh ssh-key add KEY-FILE --type signing` ([Adding a new SSH key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account)).
 
 ## Listing a user's signing keys needs no login
@@ -89,13 +100,15 @@ Sources: [About SSH](https://docs.github.com/en/authentication/connecting-to-git
 - **Confirmed: an authentication key grants repository access.** "You can access and write data in repositories on GitHub using SSH." A node key registered as an authentication key could push to every repository the account can write to. Never register node keys there. Those keys use other endpoints (`/user/keys`) and another permission ("Git SSH keys"), so a token of an app that only has "SSH signing keys" cannot add one.
 - The two lists are separate: "If you want to use the same SSH key for both authentication and signing, you need to upload it twice."
 - "There's no limit on the number of signing keys you can add to your account."
-- **Not stated in the documentation:** that a key registered only as a signing key cannot authenticate Git or SSH. The "upload it twice" rule implies it. Checking it means adding a key to the account, so it was not tested. Check it first in the next step: register a signing-only key, then `ssh -i <key> -T git@github.com` must be denied.
+- **Confirmed by test: a key registered only as a signing key cannot log in.** `ssh -F /dev/null -i <key> -T git@github.com` answers "Permission denied". The documentation does not say this in so many words; the "upload it twice" rule implies it. `-F /dev/null` matters when repeating the test: without it, an `IdentityFile` for `github.com` in `~/.ssh/config` is offered too and the login succeeds with that key.
 - "If you haven't used your SSH key for a year, then GitHub will automatically delete your inactive SSH key." Whether this applies to signing keys, which are never used against GitHub in this design, is not stated.
 
-## What this means for the next step
+## What follows for h8c
 
-- Reading the roster needs no token. Only registering a node's key does, with a user access token of the app; that can also be done by hand with `gh`.
-- The token lasts 8 hours and is needed once per node, to register the key. Nothing has to be stored unless the node should manage its key later; then it must keep the refresh token and replace it on every refresh.
-- A background refresh of the roster should stay far below 60 requests per hour while it runs without a token.
-- Anyone who can add a signing key to the account joins the network. The GitHub account, and anything allowed to write its signing keys, becomes part of the trust base.
-- The account's signing keys are public, including the ones used for commits. Every signing key on the account is a roster member unless node keys are told apart, for example by title.
+- Reading the roster needs no token, so none is kept. The token of `h8c login` is used once, to register the key, and then dropped; it expires after 8 hours. `h8c` never asks for the `offline_access` scope and never stores a refresh token.
+- A refresh costs two unauthenticated requests. Nodes refresh every 15 minutes, which is 8 requests per node and hour out of the 60 that one IP address has.
+- The account is identified by its id. The login is looked up again on every refresh.
+- Only signing keys titled `hebi8xc: ...` are node keys, so the keys used to sign commits do not become nodes.
+- Anyone who can add a signing key to the account joins the network. The GitHub account, and anything allowed to write its signing keys, is part of the trust base.
+- The account's signing keys are public. Anyone can see how many nodes an account has and what they are called.
+- While the app is private, only members of `Hebi8` can log in.
