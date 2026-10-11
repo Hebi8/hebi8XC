@@ -76,7 +76,7 @@ func TestTailscaleIsQuietWhenAbsentOrStopped(t *testing.T) {
 
 func TestMDNSAcceptsOnlyOtherNodesOfTheSameNetwork(t *testing.T) {
 	s := &MDNSSource{id: "self", tag: "aaaa"}
-	ips := []net.IP{net.IPv4(192, 168, 1, 13)}
+	ips := []net.IP{net.IPv4(192, 168, 1, 20)}
 	for _, tc := range []struct {
 		name     string
 		instance string
