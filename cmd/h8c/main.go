@@ -23,6 +23,7 @@ import (
 	"github.com/Hebi8/hebi8XC/internal/control"
 	"github.com/Hebi8/hebi8XC/internal/datadir"
 	"github.com/Hebi8/hebi8XC/internal/discovery"
+	"github.com/Hebi8/hebi8XC/internal/github"
 	"github.com/Hebi8/hebi8XC/internal/identity"
 	"github.com/Hebi8/hebi8XC/internal/node"
 	"github.com/Hebi8/hebi8XC/internal/peers"
@@ -32,12 +33,15 @@ import (
 
 const usage = `usage: h8c [--data-dir DIR] <command>
 
-  up [--listen ADDR] [--user ID] [--peer HOST[:PORT]]... [--discover LIST]
+  login                  log in to GitHub and register this node's key there
+  up [--listen ADDR] [--peer HOST[:PORT]]... [--discover LIST] [--user ID]
                          run the node in the foreground
   peers                  list the nodes the running node knows
-  id                     show this node's id, name and public key
-  trust add <key>        trust a node's public key (the "key" line of h8c id)
-  trust list             list the trusted keys
+  id                     show this node's id, name, public key and account
+  roster                 list the trusted keys and where they come from
+  roster refresh         fetch the GitHub roster now
+  trust add <key>        trust a node's public key by hand (the "key" line of h8c id)
+  trust list             list the keys trusted by hand
   trust remove <key|comment|fingerprint>
 `
 
@@ -70,7 +74,7 @@ func run(args []string, out io.Writer) error {
 	switch args[0] {
 	case "peers":
 		return listPeers(*dataDir, out)
-	case "up", "id", "trust":
+	case "up", "id", "trust", "login", "roster":
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
@@ -84,77 +88,132 @@ func run(args []string, out io.Writer) error {
 		return up(*dataDir, args[1:])
 	case "id":
 		return showID(*dataDir, out)
+	case "login":
+		return login(*dataDir, out)
+	case "roster":
+		return showRoster(*dataDir, args[1:], out)
 	default:
 		return trust(*dataDir, args[1:], out)
 	}
 }
 
+// upOptions are the flags of h8c up.
+type upOptions struct {
+	listen   string
+	user     string
+	static   []string
+	discover string
+}
+
 func up(dir string, args []string) error {
+	var o upOptions
 	fs := flag.NewFlagSet("h8c up", flag.ContinueOnError)
-	listen := fs.String("listen", ":"+strconv.Itoa(node.DefaultPort), "address the peer link listens on")
-	userID := fs.String("user", "", "user id shared by all of your nodes (default: OS user name)")
-	discover := fs.String("discover", "mdns,tailscale", "automatic discovery sources: mdns, tailscale, none")
-	var static []string
+	fs.StringVar(&o.listen, "listen", ":"+strconv.Itoa(node.DefaultPort), "address the peer link listens on")
+	fs.StringVar(&o.user, "user", "", "without a GitHub login: user id shared by all of your nodes (default: OS user name)")
+	fs.StringVar(&o.discover, "discover", "mdns,tailscale", "automatic discovery sources: mdns, tailscale, none")
 	fs.Func("peer", "address of another node, HOST[:PORT]; may be repeated", func(v string) error {
 		if _, _, err := net.SplitHostPort(v); err != nil {
 			v = net.JoinHostPort(v, strconv.Itoa(node.DefaultPort))
 		}
-		static = append(static, v)
+		o.static = append(o.static, v)
 		return nil
 	})
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *userID == "" {
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	n, closeNode, err := openNode(ctx, dir, o, log)
+	if err != nil {
+		return err
+	}
+	defer closeNode()
+	n.Run(ctx)
+	log.Info("node down")
+	return nil
+}
+
+// openNode builds the node of a data directory: identity, rosters, peer
+// table, listeners and discovery sources. The returned function releases
+// what the node holds in the directory; call it after the node has stopped.
+func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*node.Node, func(), error) {
+	account, loggedIn, err := github.LoadAccount(filepath.Join(dir, node.AccountFile))
+	if err != nil {
+		return nil, nil, err
+	}
+	userID := o.user
+	switch {
+	case loggedIn && userID != "":
+		return nil, nil, fmt.Errorf("--user does not apply: this node is logged in to GitHub as %s", account.Login)
+	case loggedIn:
+		userID = account.User()
+	case userID == "":
 		u, err := user.Current()
 		if err != nil {
-			return fmt.Errorf("cannot determine the OS user, pass --user: %w", err)
+			return nil, nil, fmt.Errorf("cannot determine the OS user, pass --user: %w", err)
 		}
 		// Windows reports DOMAIN\name.
-		*userID = u.Username[strings.LastIndex(u.Username, `\`)+1:]
+		userID = u.Username[strings.LastIndex(u.Username, `\`)+1:]
 	}
 
 	// One node per data directory. Holding the lock is also what allows
 	// control.Listen to clear a socket left behind by a crash.
 	unlock, err := datadir.Lock(dir)
 	if err != nil {
-		return fmt.Errorf("%s: %w", dir, err)
+		return nil, nil, fmt.Errorf("%s: %w", dir, err)
 	}
-	defer unlock()
+	socket := filepath.Join(dir, node.ControlSocket)
+	var ctl, ln net.Listener
+	release := func() {
+		if ln != nil {
+			ln.Close()
+		}
+		if ctl != nil {
+			ctl.Close()
+			os.Remove(socket)
+		}
+		unlock()
+	}
+	fail := func(err error) (*node.Node, func(), error) {
+		release()
+		return nil, nil, err
+	}
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ident, err := identity.Load(dir)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	trusted, err := roster.OpenFile(filepath.Join(dir, node.RosterFile))
 	if err != nil {
-		return err
+		return fail(err)
+	}
+	var remote roster.Roster
+	if loggedIn {
+		remote, err = roster.OpenGitHub(filepath.Join(dir, node.GitHubRosterFile), gh, time.Now)
+		if err != nil {
+			return fail(err)
+		}
 	}
 	table, err := peers.Load(filepath.Join(dir, node.PeersFile), time.Now, node.OfflineAfter)
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	ctl, err := control.Listen(filepath.Join(dir, node.ControlSocket))
-	if err != nil {
-		return err
+	if ctl, err = control.Listen(socket); err != nil {
+		return fail(err)
 	}
-	defer os.Remove(filepath.Join(dir, node.ControlSocket))
-	ln, err := net.Listen("tcp", *listen)
-	if err != nil {
-		return err
+	if ln, err = net.Listen("tcp", o.listen); err != nil {
+		return fail(err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	tag := discovery.NetworkTag(*userID)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	tag := discovery.NetworkTag(userID)
 
 	sources := []discovery.Source{
 		discovery.Func(discovery.Remembered, table.Addrs),
-		discovery.StaticSource(static),
+		discovery.StaticSource(o.static),
 	}
-	for _, name := range strings.Split(*discover, ",") {
+	for _, name := range strings.Split(o.discover, ",") {
 		switch name {
 		case discovery.MDNS:
 			mdns, err := discovery.StartMDNS(ctx, ident.ID, port, tag)
@@ -167,14 +226,15 @@ func up(dir string, args []string) error {
 			sources = append(sources, discovery.NewTailscaleSource(node.DefaultPort))
 		case "none", "":
 		default:
-			return fmt.Errorf("unknown discovery source %q", name)
+			return fail(fmt.Errorf("unknown discovery source %q", name))
 		}
 	}
 
 	n, err := node.New(node.Config{
 		Identity: ident,
-		User:     *userID,
+		User:     userID,
 		Local:    trusted,
+		Remote:   remote,
 		Table:    table,
 		Sources:  sources,
 		Listener: ln,
@@ -183,13 +243,15 @@ func up(dir string, args []string) error {
 		Log:      log,
 	})
 	if err != nil {
-		return err
+		return fail(err)
 	}
-	log.Info("node up", "name", ident.Name, "id", ident.ID, "listen", ln.Addr().String(),
-		"user", *userID, "network_tag", tag, "discover", *discover, "trusted_keys", len(trusted.Entries()))
-	n.Run(ctx)
-	log.Info("node down")
-	return nil
+	attrs := []any{"name", ident.Name, "id", ident.ID, "listen", ln.Addr().String(),
+		"user", userID, "network_tag", tag, "discover", o.discover, "keys_added_by_hand", len(trusted.Entries())}
+	if loggedIn {
+		attrs = append(attrs, "github", account.Login)
+	}
+	log.Info("node up", attrs...)
+	return n, release, nil
 }
 
 func listPeers(dir string, out io.Writer) error {
@@ -221,8 +283,12 @@ func showID(dir string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(out, "id    %s\nname  %s\nkey   %s %s\n",
-		ident.ID, ident.Name, sshkey.Marshal(ident.Public()), ident.Name)
+	account, err := accountLine(dir)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "id      %s\nname    %s\nkey     %s %s\ngithub  %s\n",
+		ident.ID, ident.Name, sshkey.Marshal(ident.Public()), ident.Name, account)
 	return nil
 }
 

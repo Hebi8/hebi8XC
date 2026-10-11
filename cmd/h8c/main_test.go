@@ -31,8 +31,8 @@ func TestIDAndTrustCommands(t *testing.T) {
 	}
 	var key string
 	for _, line := range strings.Split(id, "\n") {
-		if rest, ok := strings.CutPrefix(line, "key   "); ok {
-			key = rest
+		if rest, ok := strings.CutPrefix(line, "key "); ok {
+			key = strings.TrimSpace(rest)
 		}
 	}
 	if !strings.HasPrefix(key, "ssh-ed25519 ") {
