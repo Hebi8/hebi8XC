@@ -58,14 +58,14 @@ func login(dir string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	title := ""
+	found, title := false, ""
 	for _, k := range registered {
 		if key, _, err := sshkey.Parse(k.Key); err == nil && key.Equal(ident.Public()) {
-			title = k.Title
+			found, title = true, k.Title
 		}
 	}
 	switch {
-	case title == "":
+	case !found:
 		title = roster.KeyTitle(ident.Name, ident.ID)
 		if err := gh.AddSigningKey(ctx, token, title, sshkey.Marshal(ident.Public())); err != nil {
 			return fmt.Errorf("registering this node's key: %w", err)

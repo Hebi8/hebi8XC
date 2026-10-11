@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -151,20 +152,25 @@ func TestFailedLoginLeavesTheNodeLoggedOut(t *testing.T) {
 
 	// The key is on the account under a title the roster would skip. Saying
 	// "logged in" would leave a node that nobody trusts.
-	t.Run("key registered without the prefix", func(t *testing.T) {
-		fake := fakeGitHub(t)
-		dir := t.TempDir()
-		_, key := nodeKey(t, dir)
-		fake.AddKey(aliceID, "added by hand", key)
-		err := h8cFails(t, dir, "login")
-		if !strings.Contains(err.Error(), `"added by hand"`) || !strings.Contains(err.Error(), keySettingsURL) {
-			t.Errorf("err = %v, want the title and where to delete it", err)
-		}
-		loggedOut(t, dir)
-		if n := fake.Requests("POST /user/ssh_signing_keys"); n != 0 {
-			t.Errorf("posted the key %d times", n)
-		}
-	})
+	for name, title := range map[string]string{
+		"key registered without the prefix": "added by hand",
+		"key registered without a title":    "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := fakeGitHub(t)
+			dir := t.TempDir()
+			_, key := nodeKey(t, dir)
+			fake.AddKey(aliceID, title, key)
+			err := h8cFails(t, dir, "login")
+			if !strings.Contains(err.Error(), fmt.Sprintf("as %q", title)) || !strings.Contains(err.Error(), keySettingsURL) {
+				t.Errorf("err = %v, want the title and where to delete it", err)
+			}
+			loggedOut(t, dir)
+			if n := fake.Requests("POST /user/ssh_signing_keys"); n != 0 {
+				t.Errorf("posted the key %d times", n)
+			}
+		})
+	}
 }
 
 func TestRosterListsKeysBySource(t *testing.T) {
