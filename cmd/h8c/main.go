@@ -179,6 +179,7 @@ func up(dir string, args []string) error {
 		Sources:  sources,
 		Listener: ln,
 		Control:  ctl,
+		Now:      time.Now,
 		Log:      log,
 	})
 	if err != nil {

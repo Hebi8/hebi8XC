@@ -34,6 +34,11 @@ const (
 	OfflineAfter = 30 * time.Second
 
 	probeTimeout = 4 * time.Second
+	// maxProbes bounds the connections one round has open at a time.
+	maxProbes = 16
+	// maxBackoff is the longest gap between two probes of an address that
+	// does not answer. The gap doubles from Interval with every failure.
+	maxBackoff = 5 * time.Minute
 
 	// Files in the data directory, next to the identity.
 	RosterFile    = "trusted_keys"
@@ -67,6 +72,7 @@ type Config struct {
 	Sources  []discovery.Source
 	Listener net.Listener // peer link, plain TCP; the node adds TLS
 	Control  net.Listener // control socket
+	Now      func() time.Time
 	Log      *slog.Logger
 }
 
@@ -80,10 +86,17 @@ type Node struct {
 
 	mu      sync.Mutex
 	inbound map[string]string // node id -> address to call back
+	retries map[string]retry  // addresses that did not answer
 
 	// reported remembers the last trust problem logged per address, so a
 	// problem is logged once, not every round. Only Round touches it.
 	reported map[string]string
+}
+
+// retry is the backoff state of an address that does not answer.
+type retry struct {
+	failures int
+	next     time.Time // do not probe before this
 }
 
 func New(cfg Config) (*Node, error) {
@@ -92,6 +105,7 @@ func New(cfg Config) (*Node, error) {
 		log:      cfg.Log,
 		kick:     make(chan struct{}, 1),
 		inbound:  make(map[string]string),
+		retries:  make(map[string]retry),
 		reported: make(map[string]string),
 	}
 	auth := &link.Auth{Key: cfg.Identity.Key, Roster: cfg.Roster, User: cfg.User}
@@ -114,7 +128,14 @@ func New(cfg Config) (*Node, error) {
 	ctlMux.HandleFunc("GET /v1/peers", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(cfg.Table.List())
 	})
+	// The roster is reloaded before the answer is sent, so a key removed by
+	// the caller is refused from this point on. The round that follows only
+	// brings the peer table up to date.
 	ctlMux.HandleFunc("POST /v1/refresh", func(w http.ResponseWriter, r *http.Request) {
+		if err := cfg.Roster.Refresh(r.Context(), cfg.User); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		select {
 		case n.kick <- struct{}{}:
 		default:
@@ -164,37 +185,56 @@ func (n *Node) Run(ctx context.Context) {
 	}
 }
 
-// Round refreshes the roster, probes every candidate address once, records
-// the nodes that answered and marks the silent ones offline. It must not be
-// called concurrently with itself.
+// Round refreshes the roster, probes the candidate addresses that are due,
+// records the nodes that answered and marks the silent ones offline. It must
+// not be called concurrently with itself.
 func (n *Node) Round(ctx context.Context) {
 	if err := n.cfg.Roster.Refresh(ctx, n.cfg.User); err != nil {
 		n.log.Warn("roster refresh failed, using the cached keys", "err", err)
 	}
 
 	targets := n.targets(ctx)
+	now := n.cfg.Now()
 	type result struct {
 		peer Info
 		key  ed25519.PublicKey
 		err  error
 	}
 	results := make(map[string]*result, len(targets))
-	var wg sync.WaitGroup
+	n.mu.Lock()
+	for addr := range n.retries {
+		if _, ok := targets[addr]; !ok {
+			delete(n.retries, addr)
+		}
+	}
 	for addr := range targets {
-		res := &result{}
-		results[addr] = res
+		if !now.Before(n.retries[addr].next) {
+			results[addr] = &result{}
+		}
+	}
+	n.mu.Unlock()
+	for addr := range n.reported {
+		if _, ok := targets[addr]; !ok {
+			delete(n.reported, addr)
+		}
+	}
+
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, maxProbes)
+	for addr, res := range results {
+		slots <- struct{}{}
 		wg.Go(func() {
+			defer func() { <-slots }()
 			res.peer, res.key, res.err = n.hello(ctx, addr)
 		})
 	}
 	wg.Wait()
 
 	for addr, res := range results {
+		n.settle(addr, res.err, now)
 		if res.err != nil {
-			n.reportFailure(addr, res.err)
 			continue
 		}
-		delete(n.reported, addr)
 		if res.peer.ID != n.cfg.Identity.ID {
 			n.observe(res.peer, res.key, addr, targets[addr], addr)
 		}
@@ -205,6 +245,50 @@ func (n *Node) Round(ctx context.Context) {
 	}
 	if err := n.cfg.Table.Save(false); err != nil {
 		n.log.Error("saving peers", "err", err)
+	}
+}
+
+// settle updates what is remembered about addr after a probe. A node that
+// answered, even to refuse us, is probed again next round. An address that
+// did not answer is left alone for a while, longer after every failure.
+// The two trust failures are the ones the user can fix, so they are logged,
+// once per address.
+func (n *Node) settle(addr string, err error, now time.Time) {
+	var problem string
+	var untrusted *link.UntrustedError
+	switch {
+	case err == nil:
+	case errors.As(err, &untrusted):
+		// A candidate that turned out to be this node is not a problem.
+		if !untrusted.Key.Equal(n.cfg.Identity.Public()) {
+			problem = "found a node whose key is not in the roster; if h8c id on that machine shows this key, run: h8c trust add " +
+				sshkey.Marshal(untrusted.Key)
+		}
+	case errors.Is(err, link.ErrRejected):
+		problem = "a node in the roster refused this node; add this node's key (h8c id) to its roster"
+	default:
+		n.log.Debug("no answer", "addr", addr, "err", err)
+		n.mu.Lock()
+		r := n.retries[addr]
+		if Interval<<r.failures < maxBackoff {
+			r.failures++
+		}
+		// Half an interval of slack, so the round that is due is not
+		// skipped because it started a moment early.
+		r.next = now.Add(min(Interval<<r.failures, maxBackoff) - Interval/2)
+		n.retries[addr] = r
+		n.mu.Unlock()
+		return
+	}
+
+	n.mu.Lock()
+	delete(n.retries, addr)
+	n.mu.Unlock()
+	if problem == "" {
+		delete(n.reported, addr)
+	} else if n.reported[addr] != problem {
+		n.reported[addr] = problem
+		n.log.Warn(problem, "addr", addr)
 	}
 }
 
@@ -260,8 +344,10 @@ func (n *Node) handleHello(w http.ResponseWriter, r *http.Request) {
 	}
 	if peer.ID != n.cfg.Identity.ID {
 		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		callback := net.JoinHostPort(host, strconv.Itoa(peer.Port))
 		n.mu.Lock()
-		n.inbound[peer.ID] = net.JoinHostPort(host, strconv.Itoa(peer.Port))
+		n.inbound[peer.ID] = callback
+		delete(n.retries, callback) // it is up: try it in the next round
 		n.mu.Unlock()
 		n.observe(peer, link.PeerKey(r), "", []string{discovery.Inbound}, host)
 	}
@@ -280,30 +366,6 @@ func (n *Node) observe(peer Info, key ed25519.PublicKey, addr string, sources []
 	})
 	if cameOnline {
 		n.log.Info("peer online", "name", peer.Name, "id", peer.ID, "remote", remote, "via", sources)
-	}
-}
-
-// reportFailure logs the two failures the user can fix. An address that
-// simply does not answer is normal for most candidates and stays quiet.
-func (n *Node) reportFailure(addr string, err error) {
-	var problem string
-	var untrusted *link.UntrustedError
-	switch {
-	case errors.As(err, &untrusted):
-		if untrusted.Key.Equal(n.cfg.Identity.Public()) {
-			return // a candidate that turned out to be this node
-		}
-		problem = "found a node whose key is not in the roster; if h8c id on that machine shows this key, run: h8c trust add " +
-			sshkey.Marshal(untrusted.Key)
-	case errors.Is(err, link.ErrRejected):
-		problem = "a node in the roster refused this node; add this node's key (h8c id) to its roster"
-	default:
-		n.log.Debug("no answer", "addr", addr, "err", err)
-		return
-	}
-	if n.reported[addr] != problem {
-		n.reported[addr] = problem
-		n.log.Warn(problem, "addr", addr)
 	}
 }
 

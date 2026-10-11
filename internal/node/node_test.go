@@ -2,18 +2,21 @@ package node
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/control"
 	"github.com/Hebi8/hebi8XC/internal/discovery"
 	"github.com/Hebi8/hebi8XC/internal/identity"
+	"github.com/Hebi8/hebi8XC/internal/link"
 	"github.com/Hebi8/hebi8XC/internal/peers"
 	"github.com/Hebi8/hebi8XC/internal/roster"
 )
@@ -52,11 +55,12 @@ type testNode struct {
 	id     *identity.Identity
 	roster *roster.File
 	static []string
+	extra  []discovery.Source
 }
 
-func startNode(t *testing.T, c *clock) *testNode {
+func startNode(t *testing.T, c *clock, extra ...discovery.Source) *testNode {
 	t.Helper()
-	tn := &testNode{t: t, dir: t.TempDir(), clock: c}
+	tn := &testNode{t: t, dir: t.TempDir(), clock: c, extra: extra}
 	tn.boot("127.0.0.1:0")
 	return tn
 }
@@ -90,12 +94,13 @@ func (tn *testNode) boot(listen string) {
 		User:     "me",
 		Roster:   tn.roster,
 		Table:    table,
-		Sources: []discovery.Source{
+		Sources: append([]discovery.Source{
 			discovery.Func(discovery.Remembered, table.Addrs),
 			discovery.Func(discovery.Static, func() []string { return tn.static }),
-		},
+		}, tn.extra...),
 		Listener: ln,
 		Control:  ctl,
+		Now:      tn.clock.now,
 		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -294,5 +299,171 @@ func TestNodeIgnoresItself(t *testing.T) {
 	a.round()
 	if list := a.peers(); len(list) != 0 {
 		t.Errorf("node listed itself: %+v", list)
+	}
+}
+
+// stuckSource holds a round inside source collection until released.
+type stuckSource struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *stuckSource) Name() string { return "stuck" }
+
+func (s *stuckSource) Candidates(context.Context) ([]discovery.Candidate, error) {
+	s.entered <- struct{}{}
+	<-s.release
+	return nil, nil
+}
+
+// h8c trust remove must cut a key off by the time it returns, even while
+// the node is in the middle of a round that will not finish soon.
+func TestRemovedKeyIsRefusedBeforeTheRoundEnds(t *testing.T) {
+	c := newClock()
+	stuck := &stuckSource{entered: make(chan struct{}), release: make(chan struct{})}
+	a, b := startNode(t, c, stuck), startNode(t, c)
+	a.trust(b)
+	b.trust(a)
+	ctx := context.Background()
+	if _, _, err := b.hello(ctx, a.addr); err != nil {
+		t.Fatalf("hello while trusted: %v", err)
+	}
+
+	roundDone := make(chan struct{})
+	go func() {
+		a.round()
+		close(roundDone)
+	}()
+	<-stuck.entered // a has refreshed its roster and now waits on the source
+
+	// What "h8c trust remove" does: change the file through its own handle,
+	// then tell the running node.
+	cli, err := roster.OpenFile(filepath.Join(a.dir, RosterFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := cli.Remove(b.id.Name); err != nil || n != 1 {
+		t.Fatalf("Remove = %d, %v", n, err)
+	}
+	if err := control.Dial(filepath.Join(a.dir, ControlSocket)).Post(ctx, "/v1/refresh"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := b.hello(ctx, a.addr); !errors.Is(err, link.ErrRejected) {
+		t.Errorf("hello after removal: err = %v, want ErrRejected", err)
+	}
+
+	close(stuck.release)
+	<-roundDone
+}
+
+// deadEnd is an address that accepts connections and hangs up, like a
+// machine that runs something else on the port. It counts the attempts.
+type deadEnd struct {
+	ln    net.Listener
+	count atomic.Int32
+}
+
+func newDeadEnd(t *testing.T) *deadEnd {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &deadEnd{ln: ln}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			// Count before hanging up: the prober only sees the failure
+			// after the close, so its round ends after the count is in.
+			d.count.Add(1)
+			conn.Close()
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return d
+}
+
+func TestSilentAddressIsProbedLessAndLess(t *testing.T) {
+	c := newClock()
+	a := startNode(t, c)
+	dead := newDeadEnd(t)
+	a.static = []string{dead.ln.Addr().String()}
+
+	// One round every Interval, as Run does. An address that never answers
+	// is probed after 0, 20, 60, 140, 300 seconds and then every 5 minutes.
+	var probedAt []time.Duration
+	start := c.now()
+	for c.now().Sub(start) <= 15*time.Minute {
+		before := dead.count.Load()
+		a.round()
+		if dead.count.Load() != before {
+			probedAt = append(probedAt, c.now().Sub(start))
+		}
+		c.advance(Interval)
+	}
+	want := []time.Duration{0, 20 * time.Second, 60 * time.Second, 140 * time.Second,
+		300 * time.Second, 600 * time.Second, 900 * time.Second}
+	if !slices.Equal(probedAt, want) {
+		t.Errorf("probed at %v, want %v", probedAt, want)
+	}
+}
+
+// Once a backed-off address answers, it is back on the normal beat.
+func TestAnsweringAddressReturnsToTheNormalPace(t *testing.T) {
+	a, b, c := pair(t)
+	a.static = []string{b.addr}
+	a.round()
+
+	b.Close()
+	for range 6 { // fail at 10s and 30s; the next probe is due at 70s
+		c.advance(Interval)
+		a.round()
+	}
+	if a.peer(b).Online {
+		t.Fatal("b should be offline by now")
+	}
+
+	b.boot(b.addr)
+	a.round() // 60s: still backing off
+	if a.peer(b).Online {
+		t.Fatal("a probed b before the backoff was over")
+	}
+	c.advance(Interval)
+	a.round() // 70s: due, and b answers
+	if !a.peer(b).Online {
+		t.Fatal("b did not come back at the first probe that was due")
+	}
+	for range 3 {
+		c.advance(Interval)
+		a.round()
+		if p := a.peer(b); !p.LastSeen.Equal(c.now()) {
+			t.Fatalf("after recovery b was not probed in the round at %v (last seen %v)", c.now(), p.LastSeen)
+		}
+	}
+}
+
+// A peer that comes back and calls us is probed at once, whatever backoff
+// its address had built up.
+func TestHelloFromAPeerEndsItsBackoff(t *testing.T) {
+	a, b, c := pair(t)
+	a.static = []string{b.addr}
+	a.round()
+
+	b.Close()
+	for range 6 {
+		c.advance(Interval)
+		a.round()
+	}
+	b.boot(b.addr)
+	b.static = []string{a.addr}
+	b.round() // b says hello; a learns b is up
+
+	a.round() // 60s: would still be backing off
+	if p := a.peer(b); !p.Online || len(p.Addrs) != 1 || !p.Addrs[0].LastOK.Equal(c.now()) {
+		t.Errorf("a did not probe b right after b's hello: %+v", p)
 	}
 }

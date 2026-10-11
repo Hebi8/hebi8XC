@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 )
 
 // ErrNotRunning means nothing is listening on the control socket.
@@ -72,7 +74,8 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("%s %s: %s", method, path, resp.Status)
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(msg)))
 	}
 	if out == nil {
 		return nil
