@@ -110,7 +110,8 @@ func Sleep(ctx context.Context, d time.Duration) error {
 }
 
 // form posts to one of the two login endpoints, which answer errors with
-// status 200 and an "error" field.
+// status 200 and an "error" field. The request carries the device code and
+// the answer the token, so it is not redirected anywhere.
 func (c *Client) form(ctx context.Context, path string, values url.Values, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Web+path, strings.NewReader(values.Encode()))
 	if err != nil {
@@ -118,7 +119,7 @@ func (c *Client) form(ctx context.Context, path string, values url.Values, out a
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.noRedirects().Do(req)
 	if err != nil {
 		return err
 	}

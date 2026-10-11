@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -193,5 +196,69 @@ func TestAccountFileRoundTrip(t *testing.T) {
 		if _, ok := github.AccountID(user); ok {
 			t.Errorf("AccountID(%q) succeeded", user)
 		}
+	}
+}
+
+// A request that carries the token is not redirected: net/http would keep
+// the Authorization header on the way to a subdomain or to plain HTTP. A
+// read without a token may follow.
+func TestTokenIsNotSentAfterARedirect(t *testing.T) {
+	fake := githubtest.New(t)
+	fake.AddAccount(alice, "alice")
+	fake.SignIn(alice)
+	c, dc := startFlow(t, fake)
+	var w waits
+	token, err := c.WaitForToken(context.Background(), dc, w.wait)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sawToken, requests atomic.Int32
+	elsewhere := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Header.Get("Authorization") != "" {
+			sawToken.Add(1)
+		}
+		rw.Write([]byte("[]"))
+	}))
+	defer elsewhere.Close()
+	fake.SetRedirect(elsewhere.URL)
+	ctx := context.Background()
+
+	var se *github.StatusError
+	if _, err := c.Viewer(ctx, token); !errors.As(err, &se) || se.Status != http.StatusTemporaryRedirect {
+		t.Errorf("Viewer: err = %v, want the 307 as a failure", err)
+	}
+	if _, err := c.ViewerSigningKeys(ctx, token); err == nil {
+		t.Error("ViewerSigningKeys followed a redirect")
+	}
+	if err := c.AddSigningKey(ctx, token, "hebi8xc: laptop (a)", "ssh-ed25519 KEY"); err == nil {
+		t.Error("AddSigningKey followed a redirect")
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("%d requests with a token reached the redirect target, %d of them with the token",
+			requests.Load(), sawToken.Load())
+	}
+
+	if _, err := c.SigningKeys(ctx, "alice"); err != nil {
+		t.Errorf("a read without a token did not follow the redirect: %v", err)
+	}
+	if requests.Load() != 1 || sawToken.Load() != 0 {
+		t.Errorf("after the public read: %d requests, %d with a token", requests.Load(), sawToken.Load())
+	}
+}
+
+func TestMoreKeysThanAreReadIsAnError(t *testing.T) {
+	fake := githubtest.New(t)
+	fake.AddAccount(alice, "alice")
+	for i := range 999 {
+		fake.AddKey(alice, "key", fmt.Sprintf("ssh-ed25519 KEY%d", i))
+	}
+	if keys, err := fake.Client().SigningKeys(context.Background(), "alice"); err != nil || len(keys) != 999 {
+		t.Fatalf("999 keys: got %d, %v", len(keys), err)
+	}
+	fake.AddKey(alice, "key", "ssh-ed25519 KEY999")
+	if keys, err := fake.Client().SigningKeys(context.Background(), "alice"); err == nil {
+		t.Errorf("1000 keys: got %d keys and no error; a full last page may hide more", len(keys))
 	}
 }

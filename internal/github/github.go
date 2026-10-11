@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -120,10 +121,12 @@ func (c *Client) listKeys(ctx context.Context, path, token string) ([]SigningKey
 		}
 		all = append(all, keys...)
 		if len(keys) < perPage {
-			break
+			return all, nil
 		}
 	}
-	return all, nil
+	// A list cut short must not pass for the whole list: a node key on a
+	// later page would silently drop out of the roster.
+	return nil, fmt.Errorf("the account has more than %d SSH signing keys, more than h8c reads", maxPages*perPage)
 }
 
 func (c *Client) api(ctx context.Context, method, path, token string, in, out any) error {
@@ -144,10 +147,12 @@ func (c *Client) api(ctx context.Context, method, path, token string, in, out an
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	hc := c.HTTP
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
+		hc = c.noRedirects()
 	}
-	resp, err := c.HTTP.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		return err
 	}
@@ -182,4 +187,22 @@ func statusError(resp *http.Response, body []byte) error {
 		}
 	}
 	return e
+}
+
+// noRedirects returns the HTTP client for requests that carry a token or
+// lead to one. net/http keeps the Authorization header when it follows a
+// redirect to a subdomain, or to the same host over plain HTTP, so such a
+// request treats any redirect as a failure instead.
+func (c *Client) noRedirects() *http.Client {
+	hc := *c.HTTP
+	hc.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return &hc
+}
+
+// IsNotFound reports whether err is GitHub saying the thing does not exist.
+func IsNotFound(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Status == http.StatusNotFound
 }

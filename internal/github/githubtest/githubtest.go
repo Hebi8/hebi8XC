@@ -30,7 +30,9 @@ type Server struct {
 	signedIn int64    // account the device flow ends in
 	down     bool
 	limited  bool
+	redirect string
 	requests map[string]int
+	before   map[string][]func()
 }
 
 type account struct {
@@ -39,7 +41,12 @@ type account struct {
 }
 
 func New(t *testing.T) *Server {
-	s := &Server{accounts: make(map[int64]*account), tokens: make(map[string]int64), requests: make(map[string]int)}
+	s := &Server{
+		accounts: make(map[int64]*account),
+		tokens:   make(map[string]int64),
+		requests: make(map[string]int),
+		before:   make(map[string][]func()),
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /login/device/code", s.deviceCode)
 	mux.HandleFunc("POST /login/oauth/access_token", s.accessToken)
@@ -115,6 +122,23 @@ func (s *Server) SetRateLimited(limited bool) {
 	s.limited = limited
 }
 
+// SetRedirect makes every API request answer with a redirect to the same
+// path on another server.
+func (s *Server) SetRedirect(to string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.redirect = to
+}
+
+// Before runs fn once, just before the next request to the endpoint with
+// this pattern is answered. Several calls queue up, one per request. It is
+// how a test changes GitHub between two requests of one operation.
+func (s *Server) Before(pattern string, fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.before[pattern] = append(s.before[pattern], fn)
+}
+
 // Requests returns how often an endpoint was called, by its pattern, for
 // example "GET /users/{login}/ssh_signing_keys".
 func (s *Server) Requests(pattern string) int {
@@ -184,9 +208,21 @@ func (s *Server) accessToken(w http.ResponseWriter, r *http.Request) {
 func (s *Server) api(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
+		var hook func()
+		if queue := s.before[r.Pattern]; len(queue) > 0 {
+			hook, s.before[r.Pattern] = queue[0], queue[1:]
+		}
+		s.mu.Unlock()
+		if hook != nil {
+			hook()
+		}
+
+		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.requests[r.Pattern]++
 		switch {
+		case s.redirect != "":
+			http.Redirect(w, r, s.redirect+r.URL.Path, http.StatusTemporaryRedirect)
 		case s.down:
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		case s.limited:
