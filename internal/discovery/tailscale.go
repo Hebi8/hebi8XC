@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"time"
 )
 
 // TailscaleSource suggests every online peer of the local Tailscale client on
@@ -16,17 +17,21 @@ import (
 type TailscaleSource struct {
 	Port int
 
-	// status returns the output of "tailscale status --json".
-	status func(ctx context.Context) ([]byte, error)
+	// status returns the output of "tailscale status --json". It gets
+	// timeout to answer; a round does not wait longer for this source.
+	status  func(ctx context.Context) ([]byte, error)
+	timeout time.Duration
 }
 
 func NewTailscaleSource(port int) *TailscaleSource {
-	return &TailscaleSource{Port: port, status: tailscaleStatus}
+	return &TailscaleSource{Port: port, status: tailscaleStatus, timeout: 3 * time.Second}
 }
 
 func (s *TailscaleSource) Name() string { return Tailscale }
 
 func (s *TailscaleSource) Candidates(ctx context.Context) ([]Candidate, error) {
+	ctx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
 	raw, err := s.status(ctx)
 	if errors.Is(err, exec.ErrNotFound) {
 		return nil, nil
@@ -76,5 +81,7 @@ func tailscaleStatus(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, exec.ErrNotFound
 	}
-	return exec.CommandContext(ctx, bin, "status", "--json").Output()
+	cmd := exec.CommandContext(ctx, bin, "status", "--json")
+	cmd.WaitDelay = time.Second // do not wait for a killed CLI's pipes
+	return cmd.Output()
 }

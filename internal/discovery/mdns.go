@@ -20,6 +20,11 @@ const (
 	// answers again; a node that stayed silent for mdnsExpiry is forgotten.
 	browseWindow = 30 * time.Second
 	mdnsExpiry   = 75 * time.Second
+
+	// maxMDNSEntries bounds how many announced nodes are remembered.
+	// Announcements are not authenticated, so anyone on the link can send
+	// any number of them.
+	maxMDNSEntries = 64
 )
 
 // MDNSSource announces this node on the local link and collects the other
@@ -28,6 +33,7 @@ const (
 type MDNSSource struct {
 	id  string
 	tag string
+	now func() time.Time
 
 	mu   sync.Mutex
 	seen map[string]mdnsEntry // by node id
@@ -52,7 +58,7 @@ func StartMDNS(ctx context.Context, id string, port int, tag string) (*MDNSSourc
 		return nil, err
 	}
 
-	s := &MDNSSource{id: id, tag: tag, seen: make(map[string]mdnsEntry)}
+	s := &MDNSSource{id: id, tag: tag, now: time.Now, seen: make(map[string]mdnsEntry)}
 	go func() {
 		defer server.Shutdown()
 		for ctx.Err() == nil {
@@ -83,9 +89,7 @@ func (s *MDNSSource) browse(ctx context.Context, ifaces []net.Interface) {
 				return
 			}
 			if addr, ok := s.accept(e.Instance, e.Text, e.Port, e.AddrIPv4); ok {
-				s.mu.Lock()
-				s.seen[e.Instance] = mdnsEntry{addr: addr, at: time.Now()}
-				s.mu.Unlock()
+				s.remember(e.Instance, addr)
 			}
 		case <-failed:
 			<-ctx.Done()
@@ -108,17 +112,35 @@ func (s *MDNSSource) accept(instance string, text []string, port int, ips []net.
 	return "", false
 }
 
+// remember records an accepted announcement. When the cache is full, a node
+// that is not in it yet has to wait until an entry expires.
+func (s *MDNSSource) remember(id, addr string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expire()
+	if _, known := s.seen[id]; known || len(s.seen) < maxMDNSEntries {
+		s.seen[id] = mdnsEntry{addr: addr, at: s.now()}
+	}
+}
+
+// expire forgets the nodes that have stopped announcing. Callers hold mu.
+func (s *MDNSSource) expire() {
+	now := s.now()
+	for id, e := range s.seen {
+		if now.Sub(e.at) > mdnsExpiry {
+			delete(s.seen, id)
+		}
+	}
+}
+
 func (s *MDNSSource) Name() string { return MDNS }
 
 func (s *MDNSSource) Candidates(context.Context) ([]Candidate, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.expire()
 	var out []Candidate
-	for id, e := range s.seen {
-		if time.Since(e.at) > mdnsExpiry {
-			delete(s.seen, id)
-			continue
-		}
+	for _, e := range s.seen {
 		out = append(out, Candidate{Addr: e.addr, Source: MDNS})
 	}
 	return out, nil
