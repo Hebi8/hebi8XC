@@ -126,7 +126,7 @@ func (c *Client) listKeys(ctx context.Context, path, token string) ([]SigningKey
 	}
 	// A list cut short must not pass for the whole list: a node key on a
 	// later page would silently drop out of the roster.
-	return nil, fmt.Errorf("the account has more than %d SSH signing keys, more than h8c reads", maxPages*perPage)
+	return nil, fmt.Errorf("the account has %d or more SSH signing keys, more than h8c reads", maxPages*perPage)
 }
 
 func (c *Client) api(ctx context.Context, method, path, token string, in, out any) error {

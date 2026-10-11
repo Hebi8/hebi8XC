@@ -57,7 +57,7 @@ A node trusts a key that is in either of two rosters:
 
 A refresh makes two requests, both without a token:
 
-1. `GET /users/{login}/ssh_signing_keys` lists the signing keys under the login the account had at the last refresh, or at `h8c login` before the first one. A list of more than 1000 keys is not read to the end and counts as a failed refresh.
+1. `GET /users/{login}/ssh_signing_keys` lists the signing keys under the login the account had at the last refresh, or at `h8c login` before the first one. A list of 1000 keys or more is not read to the end and counts as a failed refresh.
 2. `GET /user/{id}` returns the login the account has now.
 
 Keys can only be listed by login, and after a rename the old login may belong to someone else. So the list is used only if the login of step 2 is the one it was read under. If not, the list is thrown away and both steps are repeated with the new login; if the login has changed again by then, the refresh fails and the cache stays.

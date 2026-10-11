@@ -407,7 +407,7 @@ func TestGitHubRosterRejectsATruncatedList(t *testing.T) {
 	f.fake.AddKey(aliceID, KeyTitle("desktop", "b"), sshkey.Marshal(late))
 
 	err := f.Refresh(context.Background(), alice)
-	if err == nil || !strings.Contains(err.Error(), "more than 1000") {
+	if err == nil || !strings.Contains(err.Error(), "1000 or more") {
 		t.Fatalf("err = %v, want a refusal to use a cut-off list", err)
 	}
 	if !Trusts(f, alice, node) || len(f.Entries(alice)) != 1 {
