@@ -1,0 +1,100 @@
+# Design
+
+hebi8XC connects the machines of one user. Each machine runs a node. There is no hub and no server: nodes connect pairwise.
+
+This document covers the first step: discovery, handshake, node list. Session indexing comes later as routes on the same connection.
+
+## Discovery and authentication are separate
+
+Discovery produces candidate addresses and nothing more. A candidate becomes a peer only when the handshake succeeds. A wrong or hostile candidate costs one failed connection.
+
+Sources are pluggable (`discovery.Source`) and used together:
+
+| Source | Candidates |
+| --- | --- |
+| `mdns` | Nodes announcing `_hebi8xc._tcp` on the local link with our network tag. |
+| `tailscale` | Every online peer in `tailscale status --json`, on port 4892. Silent when Tailscale is missing or stopped. |
+| `remembered` | Every address a known peer has answered on (`peers.json`). Tried from the first round after a restart. |
+| `static` | `h8c up --peer host[:port]`. |
+| `inbound` | The address a peer that called us can be called back on (its source IP and the port it reported). |
+
+An mDNS announcement holds the node id (as instance name and host name), the port, and `net=<tag>`. No key, no user name, no machine name. The **network tag** is the first 8 bytes of `SHA-256("hebi8xc network v1\0" + user id)` in hex. It keeps nodes from probing other users' nodes on a shared LAN. It is a filter, not a secret.
+
+mDNS runs on IPv4 on the one interface the OS routes multicast through, so a machine with many virtual bridges announces one address.
+
+The **user id** is `--user`, defaulting to the OS user name. It will become the GitHub account.
+
+## Identity
+
+Created on first start, in the data directory, and never changed after:
+
+- `node.json`: node id (8 random bytes, hex) and name (host name by default).
+- `node.key`: Ed25519 private key, PKCS#8 PEM, mode 600.
+
+Public keys are written in OpenSSH format (`ssh-ed25519 AAAA...`), the format GitHub uses for SSH signing keys.
+
+If one of the two files is missing the node refuses to start instead of making a new identity.
+
+## Roster
+
+The roster answers "which public keys belong to this user". A node holding one of those keys is one of the user's machines.
+
+```go
+type Roster interface {
+    Keys(user string) ([]ed25519.PublicKey, error)   // from the local cache, called in every handshake
+    Refresh(ctx context.Context, user string) error  // reload the cache from the source of truth
+}
+```
+
+This step ships `roster.File`: the file `trusted_keys`, one key per line, managed with `h8c trust`. The node calls `Refresh` at the start of every discovery round. The GitHub roster will implement the same interface; see [github-roster.md](github-roster.md).
+
+No token or other secret is ever sent to a peer.
+
+## Connection
+
+Every node runs an HTTPS server with mutual TLS 1.3 (`internal/link`). Calls between nodes are plain HTTP requests.
+
+- Each side presents a certificate self-signed with its node key. The TLS handshake proves it holds the private key.
+- There is no CA. Hostname, chain and validity are not checked. Each side takes the public key from the other's certificate and looks it up in its roster (`VerifyConnection`, so it also runs on resumed sessions).
+- The client checks the server before it sends its own certificate, so a node does not reveal its key to a server it does not trust. The server's certificate is visible to anyone who connects.
+- The server checks the roster again on every request, and the client opens a new connection per call. Removing a key takes effect on the next request.
+- Trust must be mutual. If A trusts B but B does not trust A, B drops A's connection and A reports "trusted but refused"; when B dials A, B reports the unknown key. Neither lists the other.
+
+The only route so far is `POST /v1/hello`: both sides send `{id, name, port}`. A new service is a new route on the same mux; the handler gets the caller's key from `link.PeerKey`.
+
+Default port: **4892** TCP (`h8xc` on a phone keypad).
+
+## Node list
+
+One entry per node id, stored in `peers.json`: id, name, public key, known addresses (each with the sources that suggested it and when it last worked), all sources, time of last contact, online or offline.
+
+- A discovery round runs every 10 s: collect candidates, send hello to each address, record the answers. The round is also the heartbeat.
+- A hello received from a peer counts as contact too, so a node that can only dial out still shows as online.
+- A peer with no contact for 30 s is marked offline and kept. The next contact brings it back.
+- The same node found through several sources or addresses is one entry. At most 8 addresses are kept per peer.
+- Online state is not stored; after a restart every peer is offline until contacted.
+
+## Control interface
+
+The running node listens on the Unix socket `control.sock` in the data directory (mode 600, directory mode 700) and speaks HTTP: `GET /v1/status`, `GET /v1/peers`, `POST /v1/refresh` (run a round now). `h8c peers` and `h8c trust` use it; the MCP server and desktop client will too.
+
+`control.Listen` and `control.Dial` are the only places that know the transport. Go supports Unix sockets on Windows 10 and later, so the same code is used there; this has been compiled but not run on Windows.
+
+## Data directory
+
+`--data-dir`, default `hebi8xc` under `os.UserConfigDir()`: `~/.config/hebi8xc` on Linux, `~/Library/Application Support/hebi8xc` on macOS, `%AppData%\hebi8xc` on Windows.
+
+| File | Content |
+| --- | --- |
+| `node.json`, `node.key` | Identity |
+| `trusted_keys` | Local roster |
+| `peers.json` | Node list |
+| `control.sock` | Control socket, while the node runs |
+
+## Known limits
+
+- mDNS uses one interface and IPv4, and announces the address it had at start.
+- The Tailscale source probes every online tailnet peer every round, and only on port 4892.
+- Addresses that stopped working are retried every round until newer ones push them out.
+- Any key in the roster may claim any node id. All keys belong to the same user, so this is not a boundary today.
+- On Windows the private key file relies on the profile directory's ACL; there are no mode bits.
