@@ -34,9 +34,12 @@ func (e *UntrustedError) Error() string {
 	return "peer key is not in the roster: " + sshkey.Marshal(e.Key)
 }
 
-// ErrRejected reports a peer that is in our roster but refused us, which is
-// what a peer does when our key is not in its roster.
+// ErrRejected reports a peer that is in our roster but said it does not
+// accept our key, which is what a peer does when we are not in its roster.
 var ErrRejected = errors.New("peer is trusted but refused this node")
+
+// MaxMessage bounds the JSON body of a request or reply between nodes.
+const MaxMessage = 64 << 10
 
 // tlsConfig serves both directions: a server ignores InsecureSkipVerify and a
 // client ignores ClientAuth.

@@ -7,7 +7,10 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/Hebi8/hebi8XC/internal/roster"
@@ -41,14 +44,17 @@ func (s *side) trust(t *testing.T, other *side) {
 	}
 }
 
-// serve starts s as a server on loopback that answers GET /whoami with the
-// caller's key, and returns its address.
-func (s *side) serve(t *testing.T) string {
+// serve starts s as a server on loopback and returns its address. Besides
+// any extra routes it answers GET /whoami with the caller's key.
+func (s *side) serve(t *testing.T, routes ...func(*http.ServeMux)) string {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /whoami", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(PeerKey(r))
 	})
+	for _, add := range routes {
+		add(mux)
+	}
 	srv, err := NewServer(s.auth, mux)
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +66,16 @@ func (s *side) serve(t *testing.T) string {
 	go srv.ServeTLS(ln, "", "")
 	t.Cleanup(func() { srv.Close() })
 	return ln.Addr().String()
+}
+
+func (s *side) call(t *testing.T, addr, method, path string, in, out any) error {
+	t.Helper()
+	c, err := NewClient(s.auth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Call(context.Background(), addr, method, path, in, out)
+	return err
 }
 
 func (s *side) whoami(t *testing.T, addr string) (seenAs, peer ed25519.PublicKey, err error) {
@@ -172,3 +188,94 @@ func TestRemovingAKeyTakesEffectOnTheNextCall(t *testing.T) {
 }
 
 func sshkeyOf(s *side) string { return sshkey.Marshal(s.pub()) }
+
+// A trusted node must not be able to hand the call to someone else: the
+// answer of a redirect target would arrive under the trusted node's key.
+func TestRedirectsAreNotFollowed(t *testing.T) {
+	a, b := newSide(t), newSide(t)
+	a.trust(t, b)
+	b.trust(t, a)
+
+	var hits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Write([]byte(`"forged"`))
+	}))
+	defer plain.Close()
+
+	addr := b.serve(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("POST /moved", func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, plain.URL, http.StatusTemporaryRedirect)
+		})
+	})
+
+	var out string
+	err := a.call(t, addr, "POST", "/moved", "hello", &out)
+	if err == nil || !strings.Contains(err.Error(), "307") {
+		t.Errorf("err = %v, want the 307 reported as a failure", err)
+	}
+	if out != "" || hits.Load() != 0 {
+		t.Errorf("redirect was followed: answer %q, %d requests reached the target", out, hits.Load())
+	}
+}
+
+func TestMessagesAreCapped(t *testing.T) {
+	a, b := newSide(t), newSide(t)
+	a.trust(t, b)
+	b.trust(t, a)
+	big := strings.Repeat("x", MaxMessage)
+
+	var received atomic.Int64
+	addr := b.serve(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("POST /echo", func(w http.ResponseWriter, r *http.Request) {
+			var in string
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			received.Store(int64(len(in)))
+			json.NewEncoder(w).Encode(in)
+		})
+		mux.HandleFunc("GET /big", func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(big)
+		})
+	})
+
+	var out string
+	if err := a.call(t, addr, "POST", "/echo", "small", &out); err != nil || out != "small" {
+		t.Fatalf("small message: %q, %v", out, err)
+	}
+	if err := a.call(t, addr, "POST", "/echo", big, &out); err == nil {
+		t.Error("server accepted a request body over MaxMessage")
+	}
+	if received.Load() == int64(len(big)) {
+		t.Error("server read the whole oversized body")
+	}
+	if err := a.call(t, addr, "GET", "/big", nil, &out); err == nil {
+		t.Error("client accepted a reply over MaxMessage")
+	}
+}
+
+// A trusted peer that just hangs up is a broken connection, not a refusal:
+// telling the user to fix the roster would send them the wrong way.
+func TestDroppedConnectionIsNotARefusal(t *testing.T) {
+	a, b := newSide(t), newSide(t)
+	a.trust(t, b)
+	b.trust(t, a)
+	addr := b.serve(t, func(mux *http.ServeMux) {
+		mux.HandleFunc("GET /drop", func(w http.ResponseWriter, r *http.Request) {
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			conn.Close()
+		})
+	})
+
+	var out string
+	err := a.call(t, addr, "GET", "/drop", nil, &out)
+	if err == nil || errors.Is(err, ErrRejected) {
+		t.Errorf("err = %v, want a plain connection failure", err)
+	}
+}

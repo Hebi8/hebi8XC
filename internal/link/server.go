@@ -32,12 +32,14 @@ func NewServer(a *Auth, h http.Handler) (*http.Server, error) {
 		Handler:           a.requireTrusted(h),
 		TLSConfig:         cfg,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second, // headers and body
 		ErrorLog:          log.New(handshakeFilter{os.Stderr}, "", log.LstdFlags),
 	}, nil
 }
 
 // requireTrusted re-checks the roster on every request, so removing a key
-// also cuts off connections that were opened while it was still trusted.
+// also cuts off connections that were opened while it was still trusted. It
+// also caps the request body at MaxMessage.
 func (a *Auth) requireTrusted(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key, err := peerKey(*r.TLS)
@@ -45,6 +47,7 @@ func (a *Auth) requireTrusted(next http.Handler) http.Handler {
 			http.Error(w, "untrusted", http.StatusForbidden)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, MaxMessage)
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), peerKeyCtx{}, key)))
 	})
 }
