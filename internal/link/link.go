@@ -11,7 +11,9 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
+	"net/http"
 	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/roster"
@@ -98,4 +100,18 @@ func selfSigned(key ed25519.PrivateKey) (tls.Certificate, error) {
 		return tls.Certificate{}, err
 	}
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, nil
+}
+
+// StatusError is an answer from a peer other than success.
+type StatusError struct {
+	Status  int
+	Message string
+}
+
+func (e *StatusError) Error() string {
+	text := fmt.Sprintf("peer answered %d %s", e.Status, http.StatusText(e.Status))
+	if e.Message != "" {
+		text += ": " + e.Message
+	}
+	return text
 }

@@ -75,7 +75,10 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, strings.TrimSpace(string(msg)))
+		if said := strings.TrimSpace(string(msg)); said != "" {
+			return errors.New(said)
+		}
+		return fmt.Errorf("%s %s: %s", method, path, resp.Status)
 	}
 	if out == nil {
 		return nil

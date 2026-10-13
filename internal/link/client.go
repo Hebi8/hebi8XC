@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"reflect"
+	"strings"
 )
 
 // Client makes authenticated requests to other nodes.
@@ -35,6 +36,17 @@ func NewClient(a *Auth) (*Client, error) {
 // the current roster. Redirects are not followed: only the node that passed
 // the handshake may answer.
 func (c *Client) Call(ctx context.Context, addr, method, path string, in, out any) (ed25519.PublicKey, error) {
+	return c.call(ctx, addr, method, path, in, out, MaxMessage)
+}
+
+// Get asks the node at addr for path and decodes its JSON reply, which may
+// be up to maxReply bytes, into out. Like Call, it returns the peer's key
+// once the peer has passed the roster check.
+func (c *Client) Get(ctx context.Context, addr, path string, out any, maxReply int64) (ed25519.PublicKey, error) {
+	return c.call(ctx, addr, http.MethodGet, path, nil, out, maxReply)
+}
+
+func (c *Client) call(ctx context.Context, addr, method, path string, in, out any, maxReply int64) (ed25519.PublicKey, error) {
 	var trusted ed25519.PublicKey
 	cfg := c.cfg.Clone()
 	verify := cfg.VerifyConnection
@@ -52,15 +64,21 @@ func (c *Client) Call(ctx context.Context, addr, method, path string, in, out an
 		},
 	}
 
-	body, err := json.Marshal(in)
+	var body io.Reader
+	if in != nil {
+		raw, err := json.Marshal(in)
+		if err != nil {
+			return nil, err
+		}
+		body = bytes.NewReader(raw)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, "https://"+addr+path, body)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, method, "https://"+addr+path, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := hc.Do(req)
 	if err != nil {
@@ -76,9 +94,10 @@ func (c *Client) Call(ctx context.Context, addr, method, path string, in, out an
 		return trusted, ErrRejected
 	}
 	if resp.StatusCode != http.StatusOK {
-		return trusted, fmt.Errorf("%s %s: %s", method, path, resp.Status)
+		said, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return trusted, &StatusError{Status: resp.StatusCode, Message: strings.TrimSpace(string(said))}
 	}
-	return trusted, json.NewDecoder(io.LimitReader(resp.Body, MaxMessage)).Decode(out)
+	return trusted, json.NewDecoder(io.LimitReader(resp.Body, maxReply)).Decode(out)
 }
 
 // isCertificateAlert reports whether err is a TLS alert from the peer saying
