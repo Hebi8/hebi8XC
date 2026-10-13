@@ -336,7 +336,7 @@ func (s *Service) nodes(ctx context.Context) (map[string]*Node, error) {
 		}
 		n := &Node{ID: id, Name: f.Name}
 		if !f.SyncedAt.IsZero() {
-			at := f.SyncedAt
+			at := f.SyncedAt.UTC()
 			n.SyncedAt = &at
 		}
 		nodes[id] = n
@@ -560,7 +560,7 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 			made, err := s.fetchCopy(ctx, p, key)
 			if err == nil {
 				out.From = "peer"
-				at := made.FetchedAt
+				at := made.FetchedAt.UTC()
 				out.CachedAt = &at
 				out.Incomplete = !made.Complete
 				return made, nil
@@ -572,7 +572,7 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 		return Cached{}, &NotCachedError{Node: n.Name, Why: why}
 	}
 	out.From = "cache"
-	at := have.FetchedAt
+	at := have.FetchedAt.UTC()
 	out.CachedAt = &at
 	out.Stale = have.Rev < rev
 	out.Incomplete = !have.Complete

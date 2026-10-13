@@ -111,7 +111,8 @@ type Node struct {
 	kick    chan struct{}
 	after   func(time.Duration) <-chan time.Time // time.After, except in tests
 
-	sessionsKick chan struct{} // a peer came online: read its feed soon
+	sessionsKick chan struct{}   // a peer can be read: read its feed soon
+	readable     map[string]bool // peers that were online with an address after the last round
 
 	mu      sync.Mutex
 	inbound map[string]string // node id -> address to call back
@@ -136,6 +137,7 @@ func New(cfg Config) (*Node, error) {
 		after: time.After,
 
 		sessionsKick: make(chan struct{}, 1),
+		readable:     make(map[string]bool),
 		inbound:      make(map[string]string),
 		retries:      make(map[string]retry),
 		reported:     make(map[string]string),
@@ -233,8 +235,32 @@ func (n *Node) fetchFromPeer(ctx context.Context, p sessions.Peer, path string, 
 	return fmt.Errorf("%s is now another node than %s", p.Addr, p.Name)
 }
 
+// noteReadable starts a round of the session module when a peer has become
+// readable: online, at an address this node has reached. A peer that called
+// first is online before that; its address is only known a round later.
+func (n *Node) noteReadable() {
+	if n.cfg.Sessions == nil {
+		return
+	}
+	now := make(map[string]bool)
+	fresh := false
+	for _, p := range n.sessionPeers() {
+		if p.Online && p.Addr != "" {
+			now[p.ID] = true
+			fresh = fresh || !n.readable[p.ID]
+		}
+	}
+	n.readable = now
+	if fresh {
+		select {
+		case n.sessionsKick <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // sessionsLoop runs the rounds of the session module: at start, every
-// sessions.Interval, and soon after a peer comes online.
+// sessions.Interval, and as soon as a peer becomes readable.
 func (n *Node) sessionsLoop(ctx context.Context) {
 	ticker := time.NewTicker(sessions.Interval)
 	defer ticker.Stop()
@@ -423,6 +449,7 @@ func (n *Node) Round(ctx context.Context) {
 	for _, p := range n.cfg.Table.Sweep() {
 		n.log.Info("peer offline", "name", p.Name, "id", p.ID)
 	}
+	n.noteReadable()
 	if err := n.cfg.Table.Save(false); err != nil {
 		n.log.Error("saving peers", "err", err)
 	}
@@ -546,10 +573,6 @@ func (n *Node) observe(peer Info, key ed25519.PublicKey, addr string, sources []
 	})
 	if cameOnline {
 		n.log.Info("peer online", "name", peer.Name, "id", peer.ID, "remote", remote, "via", sources)
-		select {
-		case n.sessionsKick <- struct{}{}:
-		default:
-		}
 	}
 }
 

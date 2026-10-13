@@ -1048,3 +1048,51 @@ func TestSessionsFromTheWrongNodeAreRefused(t *testing.T) {
 		t.Errorf("fetching from the right node: %v", err)
 	}
 }
+
+// The session module is told as soon as a peer can be read, and not again
+// while nothing changes. A peer that called first cannot be read until its
+// address is known, one round later.
+func TestSessionRoundStartsWhenAPeerBecomesReadable(t *testing.T) {
+	c := newClock()
+	desk, laptop := sessionNode(t, c, "desk"), sessionNode(t, c, "laptop")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	told := func(n *testNode) bool {
+		select {
+		case <-n.sessionsKick:
+			return true
+		default:
+			return false
+		}
+	}
+
+	laptop.static = []string{desk.addr}
+	laptop.round()
+	if !told(laptop) {
+		t.Error("laptop reached desk and its session module was not told")
+	}
+	if !desk.peer(laptop).Online || told(desk) {
+		t.Error("desk only got a call; it has no address to read laptop's sessions from yet")
+	}
+	desk.round() // desk calls back
+	if !told(desk) {
+		t.Error("desk reached laptop and its session module was not told")
+	}
+
+	c.advance(Interval)
+	laptop.round()
+	desk.round()
+	if told(laptop) || told(desk) {
+		t.Error("told again although nothing changed")
+	}
+
+	desk.Close()
+	c.advance(OfflineAfter + time.Second)
+	laptop.round()
+	c.advance(time.Hour)
+	desk.boot(desk.addr)
+	laptop.round()
+	if !told(laptop) {
+		t.Error("desk came back and laptop's session module was not told")
+	}
+}
