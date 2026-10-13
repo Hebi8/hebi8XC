@@ -30,6 +30,7 @@ import (
 	"github.com/Hebi8/hebi8XC/internal/peers"
 	"github.com/Hebi8/hebi8XC/internal/roster"
 	"github.com/Hebi8/hebi8XC/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/web"
 )
 
 const usage = `usage: h8c [--data-dir DIR] <command>
@@ -37,7 +38,7 @@ const usage = `usage: h8c [--data-dir DIR] <command>
   name [NEW NAME]        show or set this node's name
   login                  log in to GitHub and register this node's key there
   up [--listen ADDR] [--peer HOST[:PORT]]... [--discover LIST] [--user ID]
-     [--wake-db PATH] [--wake-cli PATH]
+     [--wake-db PATH] [--wake-cli PATH] [--web ADDR|none]
                          run the node in the foreground
   peers [--json]         list the nodes the running node knows
   id                     show this node's id, name, public key and account
@@ -45,6 +46,7 @@ const usage = `usage: h8c [--data-dir DIR] <command>
                          list the agent sessions of all nodes, newest first
   show NODE/KEY [--after ID] [--limit N] [--json]
                          read a session; the first column of "sessions" is NODE/KEY
+  web                    print the link that opens the web interface in a browser
   roster                 list the trusted keys and where they come from
   roster refresh         fetch the GitHub roster now
   trust add <key>        trust a node's public key by hand (the "key" line of h8c id)
@@ -84,6 +86,8 @@ func run(args []string, out io.Writer) error {
 		return listPeers(*dataDir, args[1:], out)
 	case "version":
 		return showVersion(out)
+	case "web":
+		return webLink(*dataDir, out)
 	case "sessions":
 		return listSessions(*dataDir, args[1:], out)
 	case "show":
@@ -121,6 +125,7 @@ type upOptions struct {
 	discover string
 	wakeDB   string
 	wakeCLI  string
+	web      string // "" and "none" leave the web interface off
 }
 
 func up(dir string, args []string) error {
@@ -131,6 +136,8 @@ func up(dir string, args []string) error {
 	fs.StringVar(&o.discover, "discover", "mdns,tailscale", "automatic discovery sources: mdns, tailscale, none")
 	fs.StringVar(&o.wakeDB, "wake-db", "", "session index of this machine (default: where Wake keeps it)")
 	fs.StringVar(&o.wakeCLI, "wake-cli", "", "wake-cli, to keep the index current (default: the one on PATH)")
+	fs.StringVar(&o.web, "web", "127.0.0.1:"+strconv.Itoa(node.DefaultPort+1),
+		"address of the web interface, on this machine only; none turns it off")
 	fs.Func("peer", "address of another node, HOST[:PORT]; may be repeated", func(v string) error {
 		if _, _, err := net.SplitHostPort(v); err != nil {
 			v = net.JoinHostPort(v, strconv.Itoa(node.DefaultPort))
@@ -159,6 +166,12 @@ func up(dir string, args []string) error {
 // table, listeners and discovery sources. The returned function releases
 // what the node holds in the directory; call it after the node has stopped.
 func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*node.Node, func(), error) {
+	webOn := o.web != "" && o.web != "none"
+	if webOn {
+		if err := web.LoopbackAddr(o.web); err != nil {
+			return nil, nil, err
+		}
+	}
 	account, loggedIn, err := github.LoadAccount(filepath.Join(dir, node.AccountFile))
 	if err != nil {
 		return nil, nil, err
@@ -185,11 +198,14 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 		return nil, nil, fmt.Errorf("%s: %w", dir, err)
 	}
 	socket := filepath.Join(dir, node.ControlSocket)
-	var ctl, ln net.Listener
+	var ctl, ln, webLn net.Listener
 	var closers []func()
 	release := func() {
 		if ln != nil {
 			ln.Close()
+		}
+		if webLn != nil {
+			webLn.Close()
 		}
 		if ctl != nil {
 			ctl.Close()
@@ -238,6 +254,19 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 	port := ln.Addr().(*net.TCPAddr).Port
 	tag := discovery.NetworkTag(userID)
 
+	// The web interface is a convenience. A port that is taken costs the
+	// page, not the node.
+	webToken := ""
+	if webOn {
+		if webToken, err = web.LoadToken(filepath.Join(dir, node.WebTokenFile)); err != nil {
+			return fail(err)
+		}
+		if webLn, err = net.Listen("tcp", o.web); err != nil {
+			log.Warn("the web interface is off: cannot listen on "+o.web, "err", err)
+			webLn = nil
+		}
+	}
+
 	sources := []discovery.Source{
 		discovery.Func(discovery.Remembered, table.Addrs),
 		discovery.StaticSource(o.static),
@@ -269,6 +298,8 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 		Sessions: svc,
 		Listener: ln,
 		Control:  ctl,
+		Web:      webLn,
+		WebToken: webToken,
 		Now:      time.Now,
 		Log:      log,
 	})
@@ -280,8 +311,30 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 	if loggedIn {
 		attrs = append(attrs, "github", account.Login)
 	}
+	if webLn != nil {
+		attrs = append(attrs, "web", webLn.Addr().String())
+	}
 	log.Info("node up", attrs...)
 	return n, release, nil
+}
+
+// webLink prints the link that opens the web interface of the running
+// node. The link carries the token; the page trades it for a cookie and
+// goes on without it.
+func webLink(dir string, out io.Writer) error {
+	var st node.Status
+	if err := control.Dial(filepath.Join(dir, node.ControlSocket)).Get(context.Background(), "/v1/status", &st); err != nil {
+		return err
+	}
+	if st.Web == "" {
+		return errors.New("the web interface of this node is off: it was started with --web none, or its port was taken (see the log of h8c up)")
+	}
+	token, err := web.ReadToken(filepath.Join(dir, node.WebTokenFile))
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, web.URL(st.Web, token))
+	return nil
 }
 
 // showVersion prints which build this is and which protocol it speaks.

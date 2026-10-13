@@ -104,13 +104,14 @@ func listSessions(dir string, args []string, out io.Writer) error {
 	project := fs.String("project", "", "only sessions whose project name or path contains this")
 	sinceText := fs.String("since", "", "only sessions updated since: 36h, 7d or 2026-10-01")
 	limit := fs.Int("limit", 30, "how many sessions to list, at most "+strconv.Itoa(sessions.MaxPage))
+	after := fs.String("after", "", "continue a listing: the value the page before ended with")
 	asJSON := fs.Bool("json", false, "print JSON")
 	text, err := parseAnywhere(fs, args)
 	if err != nil {
 		return err
 	}
 	q := url.Values{"limit": {strconv.Itoa(*limit)}, "text": text}
-	for name, value := range map[string]string{"node": *nodeName, "agent": *agent, "project": *project} {
+	for name, value := range map[string]string{"node": *nodeName, "agent": *agent, "project": *project, "after": *after} {
 		if value != "" {
 			q.Set(name, value)
 		}
@@ -161,6 +162,9 @@ func listSessions(dir string, args []string, out io.Writer) error {
 			noun = "session"
 		}
 		fmt.Fprintf(out, "%s: %d %s, %s\n", n.Name, n.Sessions, noun, nodeState(n, ours))
+	}
+	if list.Next != "" {
+		fmt.Fprintf(out, "\nmore: add --after %s\n", list.Next)
 	}
 	return nil
 }
