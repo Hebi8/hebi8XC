@@ -26,7 +26,7 @@ var api = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 type request struct {
 	method, path, host string
 	cookie, bearer     string
-	origin             string
+	origin, language   string
 }
 
 func do(t *testing.T, req request) *httptest.ResponseRecorder {
@@ -48,9 +48,57 @@ func do(t *testing.T, req request) *httptest.ResponseRecorder {
 	if req.origin != "" {
 		r.Header.Set("Origin", req.origin)
 	}
+	if req.language != "" {
+		r.Header.Set("Accept-Language", req.language)
+	}
 	w := httptest.NewRecorder()
 	New(api, testToken, testPort).ServeHTTP(w, r)
 	return w
+}
+
+// The notice is in one language: the one the browser asks for, of the two
+// there are, and English otherwise.
+func TestNoticeIsInTheLanguageOfTheBrowser(t *testing.T) {
+	const english, chinese = "This page shows your agent sessions", "这个页面显示你的 agent 会话"
+	for language, want := range map[string]string{
+		"":                                       english,
+		"en-US,en;q=0.9":                         english,
+		"zh-CN,zh;q=0.9,en;q=0.8":                chinese,
+		"zh":                                     chinese,
+		"ZH-tw":                                  chinese,
+		"en;q=0.8, zh-CN;q=0.9":                  chinese,
+		"zh-CN;q=0.5,en;q=0.9":                   english,
+		"en,zh":                                  english,
+		"zh,en":                                  chinese,
+		"fr-FR,fr;q=0.9":                         english,
+		"fr,zh;q=0.3":                            chinese,
+		"ja,en;q=0.5,zh;q=0.5":                   english,
+		"zh;q=0":                                 english,
+		"zh;q=nonsense,en;q=0.1":                 english,
+		"*":                                      english,
+		"zhx,en;q=0.1":                           english,
+		strings.Repeat("zh;q=0.1,", 2000) + "en": english,
+	} {
+		for _, req := range []request{{path: "/", language: language}, {path: "/?token=wrong", language: language}} {
+			w := do(t, req)
+			body := w.Body.String()
+			other := english
+			if want == english {
+				other = chinese
+			}
+			if w.Code != http.StatusUnauthorized || !strings.Contains(body, want) || strings.Contains(body, other) ||
+				!strings.Contains(body, "h8c web") {
+				t.Errorf("Accept-Language %.40q: %d, want the notice with %q\n%s", language, w.Code, want, body)
+			}
+			if w.Header().Get("Vary") != "Accept-Language" {
+				t.Errorf("Accept-Language %.40q: Vary = %q", language, w.Header().Get("Vary"))
+			}
+		}
+	}
+	// The page itself is the same for everyone; its script picks the words.
+	if w := do(t, request{path: "/", cookie: testToken, language: "zh-CN"}); w.Code != http.StatusOK || w.Header().Get("Vary") != "" {
+		t.Errorf("the page: %d, Vary %q", w.Code, w.Header().Get("Vary"))
+	}
 }
 
 func TestWithoutCredentialsThereIsOnlyTheNotice(t *testing.T) {
@@ -275,7 +323,7 @@ func TestPageHasNoWayToRunWhatItShows(t *testing.T) {
 			t.Errorf("app.js uses %q", banned)
 		}
 	}
-	for _, name := range []string{"index.html", "notice.html"} {
+	for _, name := range []string{"index.html", "notice.html", "notice.zh.html"} {
 		raw, err := static.ReadFile("static/" + name)
 		if err != nil {
 			t.Fatal(err)

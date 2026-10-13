@@ -172,7 +172,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *handler) front(w http.ResponseWriter, r *http.Request) {
 	if token := r.URL.Query().Get("token"); token != "" {
 		if !h.is(token) {
-			h.page(w, "notice.html", http.StatusUnauthorized)
+			h.notice(w, r)
 			return
 		}
 		http.SetCookie(w, &http.Cookie{
@@ -185,10 +185,48 @@ func (h *handler) front(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !h.allowed(r) {
-		h.page(w, "notice.html", http.StatusUnauthorized)
+		h.notice(w, r)
 		return
 	}
 	h.page(w, "index.html", http.StatusOK)
+}
+
+// notice answers a browser that may not see the page with how to get in,
+// in Chinese if it would rather read that than English.
+func (h *handler) notice(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Vary", "Accept-Language")
+	name := "notice.html"
+	if prefersChinese(r.Header.Get("Accept-Language")) {
+		name = "notice.zh.html"
+	}
+	h.page(w, name, http.StatusUnauthorized)
+}
+
+// prefersChinese reads an Accept-Language header, such as
+// "zh-CN,zh;q=0.9,en;q=0.8": of Chinese and English, is Chinese the one
+// with the higher weight, or at the same weight the one named first?
+// Without either it is not; the notice is then in English.
+func prefersChinese(accept string) bool {
+	best, chinese := 0.0, false
+	for _, part := range strings.Split(accept, ",") {
+		lang, params, _ := strings.Cut(strings.TrimSpace(part), ";")
+		lang = strings.ToLower(strings.TrimSpace(lang))
+		zh := lang == "zh" || strings.HasPrefix(lang, "zh-")
+		if !zh && lang != "en" && !strings.HasPrefix(lang, "en-") {
+			continue
+		}
+		weight := 1.0
+		if q, ok := strings.CutPrefix(strings.TrimSpace(params), "q="); ok {
+			var err error
+			if weight, err = strconv.ParseFloat(q, 64); err != nil {
+				continue
+			}
+		}
+		if weight > best {
+			best, chinese = weight, zh
+		}
+	}
+	return chinese
 }
 
 func (h *handler) page(w http.ResponseWriter, name string, status int) {
