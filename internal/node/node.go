@@ -25,6 +25,7 @@ import (
 	"github.com/Hebi8/hebi8XC/internal/roster"
 	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"github.com/Hebi8/hebi8XC/internal/sshkey"
+	"github.com/Hebi8/hebi8XC/internal/web"
 )
 
 // Protocol is the major version of what nodes say to each other: the hello,
@@ -67,6 +68,7 @@ const (
 	GitHubRosterFile = "github_keys.json"
 	PeersFile        = "peers.json"
 	SessionsFile     = "sessions.db"
+	WebTokenFile     = "web.token"
 	ControlSocket    = "control.sock"
 )
 
@@ -96,6 +98,7 @@ type Status struct {
 	Listen     string `json:"listen"`
 	Protocol   int    `json:"protocol"`
 	Version    string `json:"version"`
+	Web        string `json:"web,omitempty"` // where the web interface listens, if it is on
 }
 
 type Config struct {
@@ -113,6 +116,10 @@ type Config struct {
 	Sessions *sessions.Service
 	Listener net.Listener // peer link, plain TCP; the node adds TLS
 	Control  net.Listener // control socket
+	// Web is where the web interface listens, on this machine only, and
+	// WebToken what opens it. A nil Web leaves the interface off.
+	Web      net.Listener
+	WebToken string
 	Now      func() time.Time
 	Log      *slog.Logger
 }
@@ -123,6 +130,7 @@ type Node struct {
 	client  *link.Client
 	peerSrv *http.Server
 	ctlSrv  *http.Server
+	webSrv  *http.Server // nil if the web interface is off
 	kick    chan struct{}
 	after   func(time.Duration) <-chan time.Time // time.After, except in tests
 
@@ -209,6 +217,18 @@ func New(cfg Config) (*Node, error) {
 		svc.ControlRoutes(ctlMux)
 	}
 	n.ctlSrv = &http.Server{Handler: ctlMux}
+
+	if svc := cfg.Sessions; svc != nil && cfg.Web != nil {
+		// The page asks what "h8c sessions" and "h8c show" ask, and gets
+		// the same answers from the same code. Nothing else of the control
+		// socket is offered to a browser.
+		webMux := http.NewServeMux()
+		svc.ControlRoutes(webMux)
+		n.webSrv = &http.Server{
+			Handler:           web.New(webMux, cfg.WebToken, cfg.Web.Addr().(*net.TCPAddr).Port),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+	}
 	return n, nil
 }
 
@@ -305,12 +325,22 @@ func (n *Node) Start() {
 			n.log.Error("control socket stopped", "err", err)
 		}
 	}()
+	if n.webSrv != nil {
+		go func() {
+			if err := n.webSrv.Serve(n.cfg.Web); !errors.Is(err, http.ErrServerClosed) {
+				n.log.Error("web interface stopped", "err", err)
+			}
+		}()
+	}
 }
 
 // Close stops both servers and saves the peer table.
 func (n *Node) Close() {
 	n.peerSrv.Close()
 	n.ctlSrv.Close()
+	if n.webSrv != nil {
+		n.webSrv.Close()
+	}
 	if err := n.cfg.Table.Save(true); err != nil {
 		n.log.Error("saving peers", "err", err)
 	}
@@ -620,6 +650,14 @@ func (n *Node) noteProtocol(peer Info) {
 		peer.Name, speaks, Protocol), "id", peer.ID, "version", peer.Version)
 }
 
+// webAddr is where the web interface listens, or "" if it is off.
+func (n *Node) webAddr() string {
+	if n.webSrv == nil {
+		return ""
+	}
+	return n.cfg.Web.Addr().String()
+}
+
 func (n *Node) port() int {
 	return n.cfg.Listener.Addr().(*net.TCPAddr).Port
 }
@@ -639,5 +677,6 @@ func (n *Node) status() Status {
 		Listen:     n.cfg.Listener.Addr().String(),
 		Protocol:   Protocol,
 		Version:    buildinfo.String(),
+		Web:        n.webAddr(),
 	}
 }

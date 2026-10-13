@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -82,6 +84,7 @@ type testNode struct {
 	name     string // instead of the host name
 	wake     *waketest.DB
 	sessions *sessions.Service
+	web      bool // with the web interface, opened by webTestToken
 }
 
 func startNode(t *testing.T, c *clock, extra ...discovery.Source) *testNode {
@@ -142,7 +145,15 @@ func (tn *testNode) boot(listen string) {
 		}
 		cfg = Config{User: github.Account{ID: tn.account}.User(), Remote: tn.remote}
 	}
+	var webLn net.Listener
+	if tn.web {
+		if webLn, err = net.Listen("tcp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	tn.Node, err = New(Config{
+		Web:      webLn,
+		WebToken: webTestToken,
 		Identity: tn.id,
 		User:     cfg.User,
 		Local:    tn.roster,
@@ -1135,5 +1146,183 @@ func TestHangingWakeCLIDoesNotStopTheSessionRound(t *testing.T) {
 	}
 	if got := refs(desk.listing("")); !slices.Equal(got, []string{"desk/claude:a1 online", "laptop/claude:d4 online"}) {
 		t.Errorf("desk lists %v", got)
+	}
+}
+
+// webNode starts a node with a session index and the web interface on a
+// port of its own, and returns the address of the interface.
+func webNode(t *testing.T, c *clock, name string) (*testNode, string) {
+	t.Helper()
+	tn := &testNode{t: t, dir: t.TempDir(), clock: c, name: name, logs: make(chan string, 256), web: true}
+	tn.wake = waketest.New(t, t.TempDir())
+	tn.boot("127.0.0.1:0")
+	return tn, tn.status().Web
+}
+
+const webTestToken = "feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+
+// browser is an HTTP client that keeps cookies and does not follow
+// redirects by itself, to look at each step.
+func browser(t *testing.T) *http.Client {
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Client{Jar: jar, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+}
+
+func get(t *testing.T, c *http.Client, url string) (int, string, http.Header) {
+	t.Helper()
+	resp, err := c.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp.StatusCode, string(body), resp.Header
+}
+
+// The page in a browser on this machine: nothing without the link from
+// "h8c web"; with it, the same sessions the command line shows, of this
+// machine and of its peers, and nothing else of the node.
+func TestWebInterface(t *testing.T) {
+	c := newClock()
+	desk, addr := webNode(t, c, "desk")
+	laptop := sessionNode(t, c, "laptop")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	desk.wake.Put(waketest.Session{Key: "claude:a1", Agent: "claude", Title: "Fix the parser", Project: "parser",
+		Path: "/home/alice/src/parser", UpdatedAt: 3000},
+		waketest.Message{Role: "user", Text: "the parser drops the last token", Time: 2500},
+		waketest.Message{Role: "assistant", Text: "found it"})
+	laptop.wake.Put(waketest.Session{Key: "claude:d4", Agent: "claude", Title: "Plan the trip", Project: "notes", UpdatedAt: 1000},
+		waketest.Message{Role: "user", Text: "tickets"})
+	desk.static = []string{laptop.addr}
+	desk.round()
+	laptop.round()
+	ctx := context.Background()
+	laptop.sessions.Round(ctx)
+	desk.sessions.Round(ctx)
+	base := "http://" + addr
+
+	// A browser that never got the link.
+	stranger := browser(t)
+	if code, body, _ := get(t, stranger, base+"/"); code != 401 || !strings.Contains(body, "h8c web") || strings.Contains(body, "parser") {
+		t.Errorf("GET / without the link: %d\n%s", code, body)
+	}
+	for _, path := range []string{"/api/v1/sessions", "/api/v1/sessions/messages?node=desk&key=claude:a1"} {
+		if code, body, _ := get(t, stranger, base+path); code != 401 || strings.Contains(body, "parser") {
+			t.Errorf("GET %s without the link: %d %s", path, code, body)
+		}
+	}
+
+	// The link from "h8c web".
+	b := browser(t)
+	code, _, head := get(t, b, base+"/?token="+webTestToken)
+	if code != 303 || head.Get("Location") != "/" {
+		t.Fatalf("opening the link: %d, Location %q", code, head.Get("Location"))
+	}
+	if code, body, _ := get(t, b, base+"/"); code != 200 || !strings.Contains(body, "/app.js") {
+		t.Fatalf("the page after the link: %d", code)
+	}
+
+	// What the page asks.
+	code, body, head := get(t, b, base+"/api/v1/sessions?limit=1")
+	if code != 200 || !strings.HasPrefix(head.Get("Content-Type"), "application/json") {
+		t.Fatalf("GET /api/v1/sessions: %d %s %s", code, head.Get("Content-Type"), body)
+	}
+	var l struct {
+		Nodes    []map[string]any `json:"nodes"`
+		Sessions []map[string]any `json:"sessions"`
+		Next     string           `json:"next"`
+	}
+	if err := json.Unmarshal([]byte(body), &l); err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Nodes) != 2 || len(l.Sessions) != 1 || l.Next == "" {
+		t.Fatalf("listing: %s", body)
+	}
+	for _, field := range []string{"id", "name", "online", "sessions", "protocol", "version"} {
+		if _, ok := l.Nodes[1][field]; !ok {
+			t.Errorf("a node lacks %q: %v", field, l.Nodes[1])
+		}
+	}
+	if l.Nodes[0]["self"] != true || l.Nodes[1]["synced_at"] == nil {
+		t.Errorf("nodes = %v", l.Nodes)
+	}
+	for _, field := range []string{"ref", "node_id", "node", "online", "key", "agent", "title", "project",
+		"project_path", "created_at", "updated_at", "messages"} {
+		if _, ok := l.Sessions[0][field]; !ok {
+			t.Errorf("a session lacks %q: %v", field, l.Sessions[0])
+		}
+	}
+	if l.Sessions[0]["title"] != "Fix the parser" {
+		t.Errorf("first session = %v", l.Sessions[0])
+	}
+	code, body, _ = get(t, b, base+"/api/v1/sessions?limit=1&after="+l.Next)
+	if code != 200 || !strings.Contains(body, "Plan the trip") || strings.Contains(body, "Fix the parser") {
+		t.Errorf("the next page: %d %s", code, body)
+	}
+
+	code, body, _ = get(t, b, base+"/api/v1/sessions/messages?node="+desk.id.ID+"&key=claude:a1&limit=1")
+	var r struct {
+		Session  map[string]any   `json:"session"`
+		Messages []map[string]any `json:"messages"`
+		Next     float64          `json:"next"`
+		From     string           `json:"from"`
+	}
+	if err := json.Unmarshal([]byte(body), &r); err != nil || code != 200 {
+		t.Fatalf("reading: %d %s", code, body)
+	}
+	if r.From != "local" || len(r.Messages) != 1 || r.Next == 0 || r.Session["title"] != "Fix the parser" {
+		t.Errorf("reading = %s", body)
+	}
+	for _, field := range []string{"id", "seq", "role", "time", "text"} {
+		if _, ok := r.Messages[0][field]; !ok {
+			t.Errorf("a message lacks %q: %v", field, r.Messages[0])
+		}
+	}
+	// A session of the peer, over the link between the nodes.
+	if code, body, _ := get(t, b, base+"/api/v1/sessions/messages?node="+laptop.id.ID+"&key=claude:d4"); code != 200 ||
+		!strings.Contains(body, `"from":"peer"`) || !strings.Contains(body, "tickets") {
+		t.Errorf("reading a session of the peer: %d %s", code, body)
+	}
+	// What cannot be read says why, in words.
+	if code, body, _ := get(t, b, base+"/api/v1/sessions/messages?node=desk&key=claude:nope"); code != 404 ||
+		!strings.Contains(body, "no such session") {
+		t.Errorf("a session that is not there: %d %s", code, body)
+	}
+
+	// The control socket has more than the page gets.
+	for _, path := range []string{"/api/v1/status", "/api/v1/peers", "/api/v1/refresh", "/api/v1/roster/refresh", "/v1/sessions", "/v1/hello"} {
+		if code, body, _ := get(t, b, base+path); code != 404 {
+			t.Errorf("GET %s: %d %s", path, code, body)
+		}
+	}
+	resp, err := b.Post(base+"/api/v1/sessions", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST: %d", resp.StatusCode)
+	}
+
+	// The peer link does not serve the page, and the page's port is not a peer link.
+	var out json.RawMessage
+	if _, err := laptop.client.Get(ctx, desk.addr, "/api/v1/sessions", &out, sessions.MaxReply); err == nil {
+		t.Errorf("the peer link answered a page request: %s", out)
+	}
+}
+
+func TestNodeWithoutWebInterface(t *testing.T) {
+	a := sessionNode(t, newClock(), "desk")
+	if st := a.status(); st.Web != "" {
+		t.Errorf("status says the web interface is at %q", st.Web)
 	}
 }
