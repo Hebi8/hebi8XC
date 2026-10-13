@@ -54,6 +54,7 @@ type Service struct {
 	Log   *slog.Logger
 
 	mu        sync.Mutex
+	unshared  string // why the sessions of this machine are not shared; "" if they are
 	refreshed time.Time
 	said      map[string]string // last message logged per subject
 	pulling   sync.Mutex        // one feed is read at a time
@@ -125,6 +126,22 @@ func (s *Service) Round(ctx context.Context) {
 	}
 }
 
+// localNote returns why the sessions of this machine are not shared, or "".
+func (s *Service) localNote() string {
+	if s.Source == nil {
+		return ErrNoIndex.Error()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unshared
+}
+
+func (s *Service) setLocalNote(note string) {
+	s.mu.Lock()
+	s.unshared = note
+	s.mu.Unlock()
+}
+
 // SyncLocal makes the feed of this machine match its index, after bringing
 // the index up to date if that is due. Without an index it does nothing.
 // A failure leaves the feed as it was: an index that cannot be read right
@@ -148,13 +165,16 @@ func (s *Service) SyncLocal(ctx context.Context) {
 			level = slog.LevelInfo // normal on a machine without the indexer
 		}
 		s.say(level, "source", "sessions of this machine are not shared: "+err.Error())
+		s.setLocalNote(err.Error())
 		return
 	}
 	changed, err := s.Store.SetLocal(ctx, s.Self.ID, current)
 	if err != nil {
 		s.say(slog.LevelWarn, "source", "session feed not updated: "+err.Error())
+		s.setLocalNote(err.Error())
 		return
 	}
+	s.setLocalNote("")
 	s.say(slog.LevelInfo, "source", fmt.Sprintf("sharing the sessions of this machine (%d)", len(current)))
 	if changed > 0 {
 		s.Log.Debug("session feed updated", "sessions", len(current), "changed", changed)
@@ -337,6 +357,9 @@ type Node struct {
 	// Incompatible means it speaks another protocol than this node, so its
 	// sessions are no longer read; what was read before is still shown.
 	Incompatible bool `json:"incompatible,omitempty"`
+	// Note says, for this node, why the sessions of its machine are not
+	// shared, if they are not.
+	Note string `json:"note,omitempty"`
 }
 
 // Entry is one session in a listing.
@@ -365,6 +388,9 @@ type Entry struct {
 type Listing struct {
 	Nodes    []Node  `json:"nodes"`
 	Sessions []Entry `json:"sessions"`
+	// Next continues the listing when passed as "after"; it is empty on
+	// the last page.
+	Next string `json:"next,omitempty"`
 }
 
 // nodes returns this node and every node whose sessions are known or that
@@ -379,7 +405,8 @@ func (s *Service) nodes(ctx context.Context) (map[string]*Node, error) {
 		return nil, err
 	}
 	nodes := map[string]*Node{
-		s.Self.ID: {ID: s.Self.ID, Name: s.Self.Name, Self: true, Online: true, Protocol: s.Protocol, Version: s.Self.Version},
+		s.Self.ID: {ID: s.Self.ID, Name: s.Self.Name, Self: true, Online: true, Protocol: s.Protocol,
+			Version: s.Self.Version, Note: s.localNote()},
 	}
 	for id, f := range feeds {
 		if id == s.Self.ID {
@@ -461,11 +488,18 @@ func (s *Service) List(ctx context.Context, q Query) (Listing, error) {
 		q.Limit = 50
 	}
 	q.Limit = min(q.Limit, MaxPage)
+	q.Limit++ // one more, to know whether the listing goes on
 	listed, err := s.Store.List(ctx, q)
 	if err != nil {
 		return Listing{}, err
 	}
-	out := Listing{Nodes: make([]Node, 0, len(nodes)), Sessions: make([]Entry, 0, len(listed))}
+	next := ""
+	if len(listed) == q.Limit {
+		listed = listed[:q.Limit-1]
+		last := listed[len(listed)-1]
+		next = position{UpdatedAt: last.UpdatedAt, Node: last.Node, Key: last.Key}.String()
+	}
+	out := Listing{Nodes: make([]Node, 0, len(nodes)), Sessions: make([]Entry, 0, len(listed)), Next: next}
 	for _, n := range nodes {
 		out.Nodes = append(out.Nodes, *n)
 	}

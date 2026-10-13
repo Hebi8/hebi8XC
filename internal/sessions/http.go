@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // PeerRoutes adds what this node offers other nodes: its feed and the
@@ -34,7 +35,7 @@ func (s *Service) ControlRoutes(mux *http.ServeMux) {
 		limit, _ := strconv.Atoi(q.Get("limit"))
 		list, err := s.List(r.Context(), Query{
 			Node: q.Get("node"), Agent: q.Get("agent"), Project: q.Get("project"),
-			Since: since, Text: q["text"], Limit: limit,
+			Since: since, Text: q["text"], Limit: limit, After: q.Get("after"),
 		})
 		answer(w, list, err)
 	})
@@ -56,6 +57,9 @@ func answer(w http.ResponseWriter, v any, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.As(err, &notCached):
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	case strings.HasPrefix(err.Error(), "after is not"), strings.HasPrefix(err.Error(), "no node "),
+		strings.HasPrefix(err.Error(), "several nodes"):
+		http.Error(w, err.Error(), http.StatusBadRequest)
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}

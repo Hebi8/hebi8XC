@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -397,6 +398,33 @@ type Query struct {
 	Since   int64    // updated at or after, Unix milliseconds
 	Text    []string // each must be part of the title or the project name
 	Limit   int
+	// After continues a listing: it is the Next of the page before.
+	After string
+}
+
+// position is where a listing stands after a session, by the three values
+// it is ordered by. It travels as the After of the next page.
+type position struct {
+	UpdatedAt int64  `json:"u"`
+	Node      string `json:"n"`
+	Key       string `json:"k"`
+}
+
+func (p position) String() string {
+	raw, _ := json.Marshal(p)
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func parsePosition(text string) (position, error) {
+	var p position
+	raw, err := base64.RawURLEncoding.DecodeString(text)
+	if err == nil {
+		err = json.Unmarshal(raw, &p)
+	}
+	if err != nil {
+		return position{}, errors.New("after is not the next of an earlier page")
+	}
+	return p, nil
 }
 
 // Listed is a session together with the node it is on.
@@ -435,6 +463,15 @@ func (s *Store) List(ctx context.Context, q Query) ([]Listed, error) {
 	for _, text := range q.Text {
 		where = append(where, `(title LIKE ? ESCAPE '\' OR project LIKE ? ESCAPE '\')`)
 		args = append(args, like(text), like(text))
+	}
+	if q.After != "" {
+		p, err := parsePosition(q.After)
+		if err != nil {
+			return nil, err
+		}
+		// What comes after p in the order below.
+		where = append(where, `(updated_at < ? OR (updated_at = ? AND (node > ? OR (node = ? AND key > ?))))`)
+		args = append(args, p.UpdatedAt, p.UpdatedAt, p.Node, p.Node, p.Key)
 	}
 	args = append(args, q.Limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT `+sessionColumns+`, node FROM sessions

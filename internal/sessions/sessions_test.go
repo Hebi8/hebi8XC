@@ -1237,3 +1237,113 @@ func TestPeerThatMovedToAnotherProtocol(t *testing.T) {
 		t.Errorf("reading what was never read: %v", err)
 	}
 }
+
+// A listing is continued with the "next" of the page before. Walking it to
+// the end shows every session once, in order, whatever the page size, also
+// where many sessions share an update time.
+func TestListingContinuesWithoutGapsOrRepeats(t *testing.T) {
+	desk, laptop, net := pair(t)
+	const total = 257
+	for i := range total {
+		// Update times repeat, so the node and the key have to break ties.
+		desk.src.put(fmt.Sprintf("claude:%04d", i), fmt.Sprintf("Session %d", i), int64(1000+i/10))
+		if i%3 == 0 {
+			laptop.src.put(fmt.Sprintf("codex:%04d", i), fmt.Sprintf("Laptop %d", i), int64(1000+i/10))
+		}
+	}
+	net.sync()
+	all := total + (total+2)/3
+
+	for _, size := range []int{1, 7, 50, MaxPage} {
+		seen := make(map[string]bool)
+		var order []Entry
+		q := Query{Limit: size}
+		for pages := 0; ; pages++ {
+			if pages > all {
+				t.Fatalf("page size %d: the listing does not end", size)
+			}
+			l := laptop.list(q)
+			if len(l.Sessions) > size {
+				t.Fatalf("page size %d: a page of %d", size, len(l.Sessions))
+			}
+			for _, s := range l.Sessions {
+				if seen[s.Ref] {
+					t.Fatalf("page size %d: %s is listed twice", size, s.Ref)
+				}
+				seen[s.Ref] = true
+				order = append(order, s)
+			}
+			if l.Next == "" {
+				break
+			}
+			if len(l.Sessions) != size {
+				t.Fatalf("page size %d: a page of %d that says there is more", size, len(l.Sessions))
+			}
+			q.After = l.Next
+		}
+		if len(seen) != all {
+			t.Errorf("page size %d: %d sessions listed, want %d", size, len(seen), all)
+		}
+		for i := 1; i < len(order); i++ {
+			if order[i].UpdatedAt.After(order[i-1].UpdatedAt) {
+				t.Fatalf("page size %d: not newest first at %d", size, i)
+			}
+		}
+	}
+
+	// A filter applies to every page of its listing.
+	seen := 0
+	q := Query{Node: "laptop", Text: []string{"Laptop"}, Limit: 20}
+	for {
+		l := laptop.list(q)
+		for _, s := range l.Sessions {
+			if s.Node != "laptop" {
+				t.Fatalf("the filter was lost on a later page: %s", s.Ref)
+			}
+			seen++
+		}
+		if q.After = l.Next; q.After == "" {
+			break
+		}
+	}
+	if seen != (total+2)/3 {
+		t.Errorf("filtered listing: %d sessions, want %d", seen, (total+2)/3)
+	}
+
+	if _, err := laptop.List(ctx, Query{After: "not-a-position"}); err == nil {
+		t.Error("a made-up position was accepted")
+	}
+	if l := laptop.list(Query{Limit: MaxPage, Since: 99999}); l.Next != "" || len(l.Sessions) != 0 {
+		t.Errorf("an empty listing says there is more: %+v", l)
+	}
+}
+
+// The listing says, for this machine, why its sessions are not shared.
+func TestListingSaysWhyThisMachineSharesNothing(t *testing.T) {
+	desk, laptop, net := pair(t)
+	desk.src.put("claude:a", "A", 1)
+	net.sync()
+	note := func(m *machine) string { return m.list(Query{}).Nodes[0].Note }
+	if note(desk) != "" || note(laptop) != "" {
+		t.Fatalf("notes while both share: %q, %q", note(desk), note(laptop))
+	}
+
+	desk.src.err = fmt.Errorf("%w: no Wake index at /home/alice/.local/share/wake/wake.db", ErrNoIndex)
+	net.sync()
+	if got := note(desk); !strings.Contains(got, "no Wake index at") {
+		t.Errorf("note = %q", got)
+	}
+	if got := laptop.list(Query{}).Nodes[1].Note; got != "" {
+		t.Errorf("laptop is told about desk's index: %q", got)
+	}
+	desk.src.err = nil
+	net.sync()
+	if got := note(desk); got != "" {
+		t.Errorf("note after the index came back = %q", got)
+	}
+
+	laptop.Source = nil
+	if got := note(laptop); got != ErrNoIndex.Error() {
+		t.Errorf("note of a machine without an index = %q", got)
+	}
+}
