@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"github.com/Hebi8/hebi8XC/internal/sessions/wake"
@@ -358,5 +359,31 @@ func TestMessagesStopAtTheBudget(t *testing.T) {
 	// A budget smaller than one message still gets one message.
 	if page, more, err := x.Messages(ctx, "claude:a1", 0, 10, 100); err != nil || len(page) != 1 || !more {
 		t.Errorf("tiny budget: %d messages, more %v, %v", len(page), more, err)
+	}
+}
+
+// A wake-cli that hangs is stopped, and that counts as a failure.
+func TestCLIThatHangsIsStopped(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake wake-cli is a shell script")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "wake-cli")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db := filepath.Join(dir, "wake.db")
+	cli := wake.CLI{Bin: bin, DB: db, IndexTimeout: 30 * time.Millisecond, RefreshTimeout: 20 * time.Millisecond}
+
+	_, err := cli.Refresh(ctx)
+	if err == nil || !strings.Contains(err.Error(), "wake-cli index did not finish within 30ms") {
+		t.Errorf("hanging index: err = %v", err)
+	}
+	if err := os.WriteFile(db, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = cli.Refresh(ctx)
+	if err == nil || !strings.Contains(err.Error(), "wake-cli refresh did not finish within 20ms") {
+		t.Errorf("hanging refresh: err = %v", err)
 	}
 }

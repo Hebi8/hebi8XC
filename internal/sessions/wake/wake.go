@@ -23,6 +23,7 @@
 package wake
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -267,6 +268,11 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 type CLI struct {
 	Bin string // path of wake-cli
 	DB  string // the index it works on
+
+	// How long "wake-cli index" and "wake-cli refresh" may take; the zero
+	// values mean ten minutes and two. Building an index of some thousand
+	// sessions took well under a minute.
+	IndexTimeout, RefreshTimeout time.Duration
 }
 
 // FindCLI returns the path of wake-cli: the one named, or the one on PATH.
@@ -282,16 +288,22 @@ func FindCLI(named string) (path string, ok bool) {
 // Refresh brings the index up to date: "wake-cli index" if there is none
 // yet, "wake-cli refresh" otherwise. Both leave the index alone and still
 // succeed while Wake is running, because then Wake keeps it current. The
-// returned text is what wake-cli said.
+// returned text is what wake-cli said. A wake-cli that does not finish in
+// time is stopped, and that is an error like any other.
 func (c CLI) Refresh(ctx context.Context) (string, error) {
-	command := "refresh"
+	command, limit := "refresh", cmp.Or(c.RefreshTimeout, 2*time.Minute)
 	if _, err := os.Stat(c.DB); errors.Is(err, fs.ErrNotExist) {
-		command = "index"
+		command, limit = "index", cmp.Or(c.IndexTimeout, 10*time.Minute)
 	}
+	ctx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Bin, "--db", c.DB, command)
 	cmd.WaitDelay = 5 * time.Second
 	out, err := cmd.CombinedOutput()
 	said := strings.TrimSpace(string(out))
+	if ctx.Err() != nil {
+		return said, fmt.Errorf("wake-cli %s did not finish within %v and was stopped", command, limit)
+	}
 	if err != nil {
 		return said, fmt.Errorf("wake-cli %s: %w: %s", command, err, said)
 	}

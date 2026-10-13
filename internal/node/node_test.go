@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1094,5 +1096,44 @@ func TestSessionRoundStartsWhenAPeerBecomesReadable(t *testing.T) {
 	laptop.round()
 	if !told(laptop) {
 		t.Error("desk came back and laptop's session module was not told")
+	}
+}
+
+// wake-cli hangs on one machine. It is stopped, the node says so, and the
+// sessions of that machine and of its peers are read all the same.
+func TestHangingWakeCLIDoesNotStopTheSessionRound(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the fake wake-cli is a shell script")
+	}
+	c := newClock()
+	desk, laptop := sessionNode(t, c, "desk"), sessionNode(t, c, "laptop")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	desk.wake.Put(waketest.Session{Key: "claude:a1", Agent: "claude", Title: "On desk", UpdatedAt: 2})
+	laptop.wake.Put(waketest.Session{Key: "claude:d4", Agent: "claude", Title: "On the laptop", UpdatedAt: 1})
+
+	bin := filepath.Join(t.TempDir(), "wake-cli")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexec sleep 5\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	desk.sessions.Refresh = wake.CLI{Bin: bin, DB: desk.wake.Path, RefreshTimeout: 20 * time.Millisecond}.Refresh
+
+	desk.static = []string{laptop.addr}
+	desk.round()
+	ctx := context.Background()
+	laptop.sessions.SyncLocal(ctx)
+	desk.sessions.Round(ctx)
+
+	stopped := false
+	for len(desk.logs) > 0 {
+		if msg := <-desk.logs; strings.Contains(msg, "wake-cli refresh did not finish within 20ms") {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Error("desk did not say that it stopped wake-cli")
+	}
+	if got := refs(desk.listing("")); !slices.Equal(got, []string{"desk/claude:a1 online", "laptop/claude:d4 online"}) {
+		t.Errorf("desk lists %v", got)
 	}
 }
