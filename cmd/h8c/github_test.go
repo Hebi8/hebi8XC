@@ -267,20 +267,43 @@ func TestRosterListsKeysBySource(t *testing.T) {
 	}
 }
 
+// wakeDBs maps a data directory to the Wake index its node reads, for
+// tests that give a node one. Other nodes get a path with nothing at it.
+var wakeDBs = map[string]string{}
+
+func TestMain(m *testing.M) {
+	// No test may find or run a real wake-cli, or read a real Wake index.
+	findWakeCLI = func(named string) (string, bool) { return named, named != "" }
+	os.Exit(m.Run())
+}
+
 // startUp does what h8c up does, except that the test runs the rounds.
 func startUp(t *testing.T, dir string, logs *bytes.Buffer, peers ...string) *node.Node {
 	t.Helper()
+	if wakeDBs[dir] == "" {
+		wakeDBs[dir] = filepath.Join(dir, "no-wake.db")
+	}
 	log := slog.New(slog.NewTextHandler(logs, nil))
-	n, release, err := openNode(context.Background(), dir, upOptions{listen: "127.0.0.1:0", static: peers, discover: "none"}, log)
+	n, release, err := openNode(context.Background(), dir, upOptions{listen: "127.0.0.1:0", static: peers,
+		discover: "none", wakeDB: wakeDBs[dir]}, log)
 	if err != nil {
 		t.Fatal(err)
 	}
 	n.Start()
+	running[dir] = n
 	t.Cleanup(func() {
 		n.Close()
 		release()
+		delete(running, dir)
 	})
 	return n
+}
+
+// running maps a data directory to the node started on it.
+var running = map[string]*node.Node{}
+
+func slogTo(w *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(w, nil))
 }
 
 func listenAddr(t *testing.T, logs *bytes.Buffer) string {

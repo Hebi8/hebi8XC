@@ -36,9 +36,14 @@ const usage = `usage: h8c [--data-dir DIR] <command>
   name [NEW NAME]        show or set this node's name
   login                  log in to GitHub and register this node's key there
   up [--listen ADDR] [--peer HOST[:PORT]]... [--discover LIST] [--user ID]
+     [--wake-db PATH] [--wake-cli PATH]
                          run the node in the foreground
   peers                  list the nodes the running node knows
   id                     show this node's id, name, public key and account
+  sessions [--node N] [--agent A] [--project P] [--since WHEN] [--limit N] [--json] [TEXT]...
+                         list the agent sessions of all nodes, newest first
+  show NODE/KEY [--after ID] [--limit N] [--json]
+                         read a session; the first column of "sessions" is NODE/KEY
   roster                 list the trusted keys and where they come from
   roster refresh         fetch the GitHub roster now
   trust add <key>        trust a node's public key by hand (the "key" line of h8c id)
@@ -75,6 +80,10 @@ func run(args []string, out io.Writer) error {
 	switch args[0] {
 	case "peers":
 		return listPeers(*dataDir, out)
+	case "sessions":
+		return listSessions(*dataDir, args[1:], out)
+	case "show":
+		return showSession(*dataDir, args[1:], out)
 	case "up", "id", "name", "trust", "login", "roster":
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
@@ -106,6 +115,8 @@ type upOptions struct {
 	user     string
 	static   []string
 	discover string
+	wakeDB   string
+	wakeCLI  string
 }
 
 func up(dir string, args []string) error {
@@ -114,6 +125,8 @@ func up(dir string, args []string) error {
 	fs.StringVar(&o.listen, "listen", ":"+strconv.Itoa(node.DefaultPort), "address the peer link listens on")
 	fs.StringVar(&o.user, "user", "", "without a GitHub login: user id shared by all of your nodes (default: OS user name)")
 	fs.StringVar(&o.discover, "discover", "mdns,tailscale", "automatic discovery sources: mdns, tailscale, none")
+	fs.StringVar(&o.wakeDB, "wake-db", "", "session index of this machine (default: where Wake keeps it)")
+	fs.StringVar(&o.wakeCLI, "wake-cli", "", "wake-cli, to keep the index current (default: the one on PATH)")
 	fs.Func("peer", "address of another node, HOST[:PORT]; may be repeated", func(v string) error {
 		if _, _, err := net.SplitHostPort(v); err != nil {
 			v = net.JoinHostPort(v, strconv.Itoa(node.DefaultPort))
@@ -169,6 +182,7 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 	}
 	socket := filepath.Join(dir, node.ControlSocket)
 	var ctl, ln net.Listener
+	var closers []func()
 	release := func() {
 		if ln != nil {
 			ln.Close()
@@ -176,6 +190,9 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 		if ctl != nil {
 			ctl.Close()
 			os.Remove(socket)
+		}
+		for _, c := range closers {
+			c()
 		}
 		unlock()
 	}
@@ -203,6 +220,11 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 	if err != nil {
 		return fail(err)
 	}
+	svc, closeSessions, err := openSessions(dir, o, ident, log)
+	if err != nil {
+		return fail(err)
+	}
+	closers = append(closers, closeSessions)
 	if ctl, err = control.Listen(socket); err != nil {
 		return fail(err)
 	}
@@ -240,6 +262,7 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 		Remote:   remote,
 		Table:    table,
 		Sources:  sources,
+		Sessions: svc,
 		Listener: ln,
 		Control:  ctl,
 		Now:      time.Now,
