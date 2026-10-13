@@ -3,6 +3,7 @@
 package buildinfo
 
 import (
+	"regexp"
 	"runtime/debug"
 	"strings"
 )
@@ -59,4 +60,24 @@ func String() string {
 		return "devel-" + strings.TrimSuffix(c, "-modified")
 	}
 	return v
+}
+
+// pseudo matches the version the toolchain gives a build from a checkout
+// that is not at a tag: a base version, a time and twelve characters of the
+// commit, as in "v0.3.2-0.20261013104500-0123456789ab", with "+dirty" if
+// the checkout had changes.
+var pseudo = regexp.MustCompile(`^v\d+\.\d+\.\d+-(?:.*\.)?\d{14}-([0-9a-f]{12})(?:\+.*)?$`)
+
+// Short names a build, this one's or a peer's, in a few characters, for a
+// table or a page: a release by its version, and a build from a checkout,
+// whose version is long and says little, by seven characters of its
+// commit. Where there is room, the whole string says more.
+func Short(build string) string {
+	if m := pseudo.FindStringSubmatch(build); m != nil {
+		return m[1][:7]
+	}
+	if commit, ok := strings.CutPrefix(build, "devel-"); ok && len(commit) > 7 {
+		return commit[:7]
+	}
+	return build
 }

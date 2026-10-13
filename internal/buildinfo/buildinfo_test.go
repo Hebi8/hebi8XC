@@ -11,6 +11,26 @@ func with(t *testing.T, info *debug.BuildInfo) {
 	t.Cleanup(func() { read = old })
 }
 
+func TestShort(t *testing.T) {
+	for build, want := range map[string]string{
+		"v0.3.1":                             "v0.3.1",
+		"v0.3.1+dirty":                       "v0.3.1+dirty",
+		"v1.0.0-rc.1":                        "v1.0.0-rc.1",
+		"v0.0.0-20261013104500-0123456789ab": "0123456",
+		"v0.0.0-20261013104500-0123456789ab+dirty":  "0123456",
+		"v0.3.2-0.20261013104500-0123456789ab":      "0123456",
+		"v0.4.0-rc.1.0.20261013104500-0123456789ab": "0123456",
+		"devel-0123456789ab":                        "0123456",
+		"devel":                                     "devel",
+		"":                                          "",
+		"v0.0.0-20261013104500-0123456789ab-and-more": "v0.0.0-20261013104500-0123456789ab-and-more",
+	} {
+		if got := Short(build); got != want {
+			t.Errorf("Short(%q) = %q, want %q", build, got, want)
+		}
+	}
+}
+
 func TestBuildInfo(t *testing.T) {
 	rev := debug.BuildSetting{Key: "vcs.revision", Value: "0123456789abcdef0123456789abcdef01234567"}
 	dirty := debug.BuildSetting{Key: "vcs.modified", Value: "true"}

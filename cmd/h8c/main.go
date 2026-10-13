@@ -401,9 +401,12 @@ func listPeers(dir string, args []string, out io.Writer) error {
 	return tw.Flush()
 }
 
-// build describes the build a peer runs. A peer that did not say runs one
-// from before nodes reported their version; those all speak protocol 1.
+// build describes the build a peer runs, in the short form: the table has
+// little room, and peers --json has the whole version. A peer that did not
+// say runs one from before nodes reported their version; those all speak
+// protocol 1.
 func build(version string, speaks, ours int) string {
+	version = buildinfo.Short(version)
 	if version == "" {
 		version = "unknown"
 	}

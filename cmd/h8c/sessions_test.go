@@ -428,7 +428,8 @@ func TestBuildColumn(t *testing.T) {
 		want         string
 	}{
 		{"v0.3.1", 1, 1, "v0.3.1, protocol 1"},
-		{"", 1, 1, "unknown, protocol 1"}, // a build from before nodes said what they run
+		{"v0.0.0-20261013104500-0123456789ab+dirty", 1, 1, "0123456, protocol 1"}, // a build from a checkout, by its commit
+		{"", 1, 1, "unknown, protocol 1"},                                         // a build from before nodes said what they run
 		{"v2.0.0", 2, 1, "v2.0.0, protocol 2 (incompatible: this node speaks 1)"},
 	} {
 		if got := build(tc.version, tc.speaks, tc.ours); got != tc.want {
