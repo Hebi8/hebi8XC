@@ -126,7 +126,7 @@ h8c sessions / h8c show --control socket--> node: own feed + copies + cached mes
 - Sessions that Wake mirrored from other hosts (`host` not empty) are left out. They belong to another machine.
 - What it reads of a session: key (`<agent>:<id>`), agent, title, project name and path, branch, model, creation and update time, message count, parent session, whether an agent spawned it, whether it is archived. Of a message: Wake's text for it, role, time, number, side thread. This is the text Wake indexes, not a rendering of the session file.
 
-Where `wake-cli` is found, on PATH or through `--wake-cli`, the node runs `wake-cli refresh` every 2 minutes, and `wake-cli index` first if there is no index. While the Wake app runs, both commands leave the index alone and succeed, because the app keeps it current. Without `wake-cli` an existing index is read as it is. The index is taken from Wake's default location unless `--wake-db` names another.
+Where `wake-cli` is found, on PATH or through `--wake-cli`, the node runs `wake-cli refresh` every 2 minutes, and `wake-cli index` first if there is no index. While the Wake app runs, both commands leave the index alone and succeed, because the app keeps it current. A `refresh` that takes more than 2 minutes, or an `index` that takes more than 10, is stopped; the round goes on with the index as it is and with the peers. Without `wake-cli` an existing index is read as it is. The index is taken from Wake's default location unless `--wake-db` names another, and it does not have to exist when the node starts: it is looked for every round.
 
 The rest of the module only sees an interface, `sessions.Source`: list the sessions of this machine, read the messages of one. Wake is its first implementation.
 
@@ -143,9 +143,10 @@ Two routes on the peer link, so only roster members reach them:
 | Route | Answer |
 | --- | --- |
 | `GET /v1/sessions?after=REV&limit=N` | `{epoch, changes: [{rev, deleted, key, agent, title, ...}], more}`, in order of revision |
-| `GET /v1/sessions/messages?key=KEY&after=ID&limit=N` | `{rev, messages: [{id, seq, role, time, text, sidechain, truncated}], more}`, in order |
+| `GET /v1/sessions/messages?key=KEY&after=ID&limit=N` | `{epoch, rev, messages: [{id, seq, role, time, text, sidechain, truncated}], more}`, in order |
 
 - An answer holds at most 500 items and about 1 MiB of JSON, whichever comes first, but always one item. Message text is cut at 200 000 characters and marked. The reader accepts answers up to 8 MiB.
+- A page of messages is cut while it is read from the index. The node that answers never holds more of a session in memory than it sends.
 - Only sessions in the feed can be read. A key is a value in a query, never part of a path or of SQL.
 - The reader checks that the answer came from the key the peer is known by. An address can pass from one node to another.
 
@@ -156,9 +157,11 @@ Every minute, and as soon as a peer becomes reachable, a node reads what is new 
 A session of this machine is read straight from the index. A session of another node is read from a copy in `sessions.db`:
 
 - The first time, the node fetches the whole session from its machine, page by page, and stores it. Later readings use the copy.
-- The copy records the revision it was made from. When the feed shows a newer revision, the next reading fetches the session again. The new copy replaces the old one only when it is complete; if the fetch fails, the old copy is shown and marked as out of date.
+- The copy records the revision it was made from. When the feed shows a newer revision, the next reading fetches the session again. The new copy replaces the old one only when it has been fetched to the end; if the fetch fails, the old copy is shown and marked as out of date.
+- One copy of a session is made at a time. A second reader waits for the first one's copy and uses it. Whatever is fetched for a copy that is then not used is removed again.
+- A copy belongs to the feed it was made from. If the node starts a new feed while a copy is being made, revisions mean something else: the copy is dropped, and the reader is asked to try again.
 - When the other node is offline, the copy is shown with the time it was made. A session that was never read has no copy, and the reader is told so.
-- A copy stops at 256 MiB and is then marked as not reaching the end.
+- A copy stops at 256 MiB, counted in whole messages, or after 2000 answers, and is then marked as not reaching the end. Such a copy is used as it is until the session changes.
 
 Nothing is ever removed from the cache except what its machine deleted.
 
@@ -205,6 +208,7 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 - Sessions: news travels with a delay. A change reaches the index within 2 minutes when `wake-cli` does the refreshing, the feed within another minute, and a peer within one more.
 - Sessions: the first reading of a long session copies all of it before anything is shown. Message text beyond 200 000 characters is not transferred.
 - Sessions: the marks for deleted sessions stay in the feed for good.
+- Sessions: an answer from a peer is limited by size, 8 MiB. That it holds at most 500 items is checked after it has been decoded, so a node that set out to could make a peer allocate far more memory than that. Nodes in the roster are the user's own and are trusted not to.
 - Sessions: a newer Wake may change its database. Then this machine's sessions stop being shared until the reader is updated.
 - On Windows the private key file relies on the profile directory's ACL; there are no mode bits.
 - On Windows 11 `h8c id`, `login`, `up`, `peers` and `roster` have been run, with the control socket and the directory lock. mDNS has not been seen working there yet, and inbound connections need firewall rules that `h8c` does not create; see the README.
