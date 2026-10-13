@@ -1,15 +1,23 @@
 // Package waketest builds a database with the tables of a Wake index, for
-// tests. The table definitions are the ones of Wake v0.9.2; the content is
-// whatever a test puts in. It stands in for Wake: no test reads a real index.
+// tests and for the demo in scripts. The table definitions are the ones of
+// Wake v0.9.2; the content is whatever the caller puts in. It stands in for
+// Wake: no test reads a real index.
 package waketest
 
 import (
 	"database/sql"
 	"path/filepath"
-	"testing"
 
 	_ "modernc.org/sqlite"
 )
+
+// TB is what the index needs of a test: a testing.TB has it. The demo,
+// which is no test, brings its own.
+type TB interface {
+	Helper()
+	Fatal(args ...any)
+	Cleanup(func())
+}
 
 // Schema is the part of Wake's schema that h8c reads, as Wake v0.9.2
 // creates it.
@@ -53,7 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key);
 // writes in WAL mode, so readers are tested against a live writer.
 type DB struct {
 	Path string
-	t    testing.TB
+	t    TB
 	db   *sql.DB
 }
 
@@ -83,7 +91,7 @@ type Message struct {
 }
 
 // New creates an empty index in dir.
-func New(t testing.TB, dir string) *DB {
+func New(t TB, dir string) *DB {
 	t.Helper()
 	d := &DB{Path: filepath.Join(dir, "wake.db"), t: t}
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(d.Path)+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(3000)")
