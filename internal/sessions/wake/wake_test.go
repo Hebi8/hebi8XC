@@ -60,7 +60,7 @@ func TestSessionsAreThoseOfThisMachine(t *testing.T) {
 	}
 
 	// A mirrored session cannot be read either, whoever asks for its key.
-	if msgs, err := x.Messages(ctx, "claude:otherbox:c3", 0, 10); err != nil || len(msgs) != 0 {
+	if msgs, _, err := x.Messages(ctx, "claude:otherbox:c3", 0, 10, sessions.PageBudget); err != nil || len(msgs) != 0 {
 		t.Errorf("messages of a mirrored session: %v, %v", msgs, err)
 	}
 }
@@ -103,14 +103,14 @@ func TestMessagesInPages(t *testing.T) {
 	var all []sessions.Message
 	after := int64(0)
 	for {
-		page, err := x.Messages(ctx, "claude:a1", after, 2)
+		page, more, err := x.Messages(ctx, "claude:a1", after, 2, sessions.PageBudget)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(page) == 0 {
+		all = append(all, page...)
+		if !more {
 			break
 		}
-		all = append(all, page...)
 		after = page[len(page)-1].ID
 	}
 	if len(all) != 5 {
@@ -133,11 +133,11 @@ func TestMessagesInPages(t *testing.T) {
 	if all[4].Truncated || all[4].Text != "five" {
 		t.Errorf("last message = %+v", all[4])
 	}
-	if msgs, err := x.Messages(ctx, "claude:nope", 0, 10); err != nil || len(msgs) != 0 {
+	if msgs, _, err := x.Messages(ctx, "claude:nope", 0, 10, sessions.PageBudget); err != nil || len(msgs) != 0 {
 		t.Errorf("unknown session: %v, %v", msgs, err)
 	}
 	// A key is data, never SQL.
-	if msgs, err := x.Messages(ctx, "x' OR '1'='1", 0, 10); err != nil || len(msgs) != 0 {
+	if msgs, _, err := x.Messages(ctx, "x' OR '1'='1", 0, 10, sessions.PageBudget); err != nil || len(msgs) != 0 {
 		t.Errorf("key with a quote: %v, %v", msgs, err)
 	}
 }
@@ -161,7 +161,7 @@ func TestUnknownStructureIsRefused(t *testing.T) {
 		if err != nil && !strings.Contains(err.Error(), "cannot make out the structure of the Wake index") {
 			t.Errorf("%s: message = %q", name, err)
 		}
-		if _, err := x.Messages(ctx, "claude:a1", 0, 1); !errors.As(err, &schema) {
+		if _, _, err := x.Messages(ctx, "claude:a1", 0, 1, sessions.PageBudget); !errors.As(err, &schema) {
 			t.Errorf("%s: Messages err = %v", name, err)
 		}
 		x.Close()
@@ -229,7 +229,7 @@ func TestIndexIsOpenedReadOnly(t *testing.T) {
 		if _, err := x.Sessions(ctx); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := x.Messages(ctx, "claude:a1", 0, 10); err != nil {
+		if _, _, err := x.Messages(ctx, "claude:a1", 0, 10, sessions.PageBudget); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -301,5 +301,62 @@ func TestDefaultPath(t *testing.T) {
 	}
 	if !strings.HasSuffix(filepath.ToSlash(path), "/wake/wake.db") || !filepath.IsAbs(path) {
 		t.Errorf("DefaultPath = %q", path)
+	}
+}
+
+// A page of a long session is cut while it is read. Reading everything up
+// to the item limit first would take a hundred times the memory.
+func TestMessagesStopAtTheBudget(t *testing.T) {
+	db := waketest.New(t, t.TempDir())
+	var msgs []waketest.Message
+	const count = 120
+	for range count {
+		msgs = append(msgs, waketest.Message{Role: "tool", Text: strings.Repeat("z", sessions.MaxText)})
+	}
+	db.Put(waketest.Session{Key: "claude:a1", Agent: "claude", UpdatedAt: 1}, msgs...)
+	x := wake.Open(db.Path)
+	defer x.Close()
+	if _, err := x.Sessions(ctx); err != nil { // open the index before measuring
+		t.Fatal(err)
+	}
+
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	page, more, err := x.Messages(ctx, "claude:a1", 0, sessions.MaxPage, sessions.PageBudget)
+	runtime.ReadMemStats(&after)
+	if err != nil || !more {
+		t.Fatalf("page: more %v, %v", more, err)
+	}
+	if want := sessions.PageBudget / sessions.MaxText; len(page) != want {
+		t.Errorf("page has %d messages, want the %d that fit the budget", len(page), want)
+	}
+	// All 120 messages are 24 MB of text. A page is one.
+	if used := after.TotalAlloc - before.TotalAlloc; used > 8<<20 {
+		t.Errorf("reading one page allocated %d MiB", used>>20)
+	}
+
+	// Nothing is skipped where a page ends.
+	seen, cursor := 0, int64(0)
+	for {
+		page, more, err := x.Messages(ctx, "claude:a1", cursor, sessions.MaxPage, sessions.PageBudget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range page {
+			if seen++; m.Seq != int64(seen) {
+				t.Fatalf("message %d has seq %d", seen, m.Seq)
+			}
+			cursor = m.ID
+		}
+		if !more {
+			break
+		}
+	}
+	if seen != count {
+		t.Errorf("read %d of %d messages", seen, count)
+	}
+	// A budget smaller than one message still gets one message.
+	if page, more, err := x.Messages(ctx, "claude:a1", 0, 10, 100); err != nil || len(page) != 1 || !more {
+		t.Errorf("tiny budget: %d messages, more %v, %v", len(page), more, err)
 	}
 }

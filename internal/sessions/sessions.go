@@ -7,6 +7,7 @@ package sessions
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 )
 
@@ -51,9 +52,18 @@ type Source interface {
 	// Sessions returns every session of this machine.
 	Sessions(ctx context.Context) ([]Session, error)
 	// Messages returns the messages of a session whose ID is above after,
-	// in order, at most limit of them. Text longer than MaxText characters
-	// is cut and marked.
-	Messages(ctx context.Context, key string, after int64, limit int) ([]Message, error)
+	// in order: at most limit of them, and no more than fit into budget
+	// bytes by MessageSize, but always one. It must stop reading there, not
+	// read on and discard. more says whether the session goes on. Text
+	// longer than MaxText characters is cut and marked.
+	Messages(ctx context.Context, key string, after int64, limit, budget int) (msgs []Message, more bool, err error)
+}
+
+// MessageSize is the size a message counts for: that of its JSON, which is
+// about what it takes to send and to store.
+func MessageSize(m Message) int {
+	raw, _ := json.Marshal(m)
+	return len(raw) + 1
 }
 
 // Limits on what one node hands another, and on what it accepts.
@@ -62,18 +72,24 @@ const (
 	MaxText = 200_000
 	// MaxPage is the most sessions or messages in one answer.
 	MaxPage = 500
-	// pageBudget is the size an answer may reach before it is cut off, in
+	// PageBudget is the size an answer may reach before it is cut off, in
 	// bytes of JSON. One message is always sent, however long.
-	pageBudget = 1 << 20
+	PageBudget = 1 << 20
 	// MaxReply is the largest answer a node reads from a peer. A page stays
-	// below it: pageBudget plus one message of MaxText characters.
+	// below it: PageBudget plus one message of MaxText characters.
 	MaxReply = 8 << 20
 	// maxField is the longest title, path or other descriptive field kept.
 	maxField = 4096
-	// maxSessionsPerNode and maxCachedBytes bound what one peer can make
-	// this node store about its sessions, and in one cached session.
+	// maxSessionsPerNode bounds how many sessions of one peer are kept.
 	maxSessionsPerNode = 200_000
-	maxCachedBytes     = 256 << 20
+)
+
+// The copy of one session stops at maxCopyBytes, counted by MessageSize, or
+// after maxCopyPages answers, whichever comes first. Variables so that
+// tests can reach them.
+var (
+	maxCopyBytes = 256 << 20
+	maxCopyPages = 2000
 )
 
 var (

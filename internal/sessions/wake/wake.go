@@ -223,10 +223,10 @@ func (x *Index) Sessions(ctx context.Context) ([]sessions.Session, error) {
 	return out, nil
 }
 
-func (x *Index) Messages(ctx context.Context, key string, after int64, limit int) ([]sessions.Message, error) {
+func (x *Index) Messages(ctx context.Context, key string, after int64, limit, budget int) ([]sessions.Message, bool, error) {
 	db, err := x.open(ctx)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	// The join keeps this to sessions of this machine, whatever key is asked for.
 	rows, err := db.QueryContext(ctx, `
@@ -234,26 +234,33 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit int
 		       substr(m.text, 1, ?), length(m.text) > ?
 		FROM messages m JOIN sessions s ON s.key = m.session_key
 		WHERE m.session_key = ? AND s.host = '' AND m.id > ?
-		ORDER BY m.id LIMIT ?`, sessions.MaxText, sessions.MaxText, key, after, limit)
+		ORDER BY m.id LIMIT ?`, sessions.MaxText, sessions.MaxText, key, after, limit+1)
 	if err != nil {
 		x.fail(db)
-		return nil, err
+		return nil, false, err
 	}
+	// Rows are read one at a time and reading stops at the budget: a page of
+	// a long session must not pull hundreds of messages into memory first.
 	defer rows.Close()
 	var out []sessions.Message
+	size := 0
 	for rows.Next() {
 		var m sessions.Message
 		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated); err != nil {
 			x.fail(db)
-			return nil, err
+			return nil, false, err
+		}
+		size += sessions.MessageSize(m)
+		if len(out) == limit || (size > budget && len(out) > 0) {
+			return out, true, nil
 		}
 		out = append(out, m)
 	}
 	if err := rows.Err(); err != nil {
 		x.fail(db)
-		return nil, err
+		return nil, false, err
 	}
-	return out, nil
+	return out, false, nil
 }
 
 // CLI runs wake-cli to keep the index current while Wake itself is closed.

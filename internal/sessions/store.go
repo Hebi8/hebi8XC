@@ -517,20 +517,24 @@ func (s *Store) Cached(ctx context.Context, node, key string) (c Cached, ok bool
 }
 
 // NewCopy starts a new copy of a session's messages beside the one in use,
-// if any, and returns its number.
+// if any, and returns its number. Whatever is left of copies that were
+// started and never put in use is removed first. Only one copy of a session
+// may be under way at a time; the caller sees to that.
 func (s *Store) NewCopy(ctx context.Context, node, key string) (gen int64, err error) {
-	// A copy that was started and never finished may be in the way.
-	err = s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(gen), 0) + 1 FROM messages WHERE node = ? AND key = ?`,
-		node, key).Scan(&gen)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
+	defer tx.Rollback()
 	var inUse int64
-	err = s.db.QueryRowContext(ctx, `SELECT gen FROM content WHERE node = ? AND key = ?`, node, key).Scan(&inUse)
+	err = tx.QueryRowContext(ctx, `SELECT gen FROM content WHERE node = ? AND key = ?`, node, key).Scan(&inUse)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	return max(gen, inUse+1), nil
+	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE node = ? AND key = ? AND gen <> ?`, node, key, inUse); err != nil {
+		return 0, err
+	}
+	return inUse + 1, tx.Commit()
 }
 
 // AddToCopy appends messages to a copy.
@@ -551,13 +555,29 @@ func (s *Store) AddToCopy(ctx context.Context, node, key string, gen int64, msgs
 	return tx.Commit()
 }
 
-// UseCopy makes a copy the one in use and removes the others.
-func (s *Store) UseCopy(ctx context.Context, node, key string, gen, rev int64, complete bool) error {
+// ErrFeedChanged means the feed a copy was being made from is no longer the
+// one on record for its node, or no longer lists the session.
+var ErrFeedChanged = errors.New("the node's session feed changed meanwhile")
+
+// UseCopy makes a copy the one in use and removes the others. The copy was
+// made while the node's feed had the given epoch; if the feed on record is
+// another one by now, or the session is gone from it, the copy describes
+// something that no longer exists and ErrFeedChanged is returned instead.
+func (s *Store) UseCopy(ctx context.Context, node, key, epoch string, gen, rev int64, complete bool) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var listed int
+	err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions s JOIN nodes n ON n.node = s.node
+		WHERE s.node = ? AND s.key = ? AND s.deleted = 0 AND n.epoch = ?`, node, key, epoch).Scan(&listed)
+	if err != nil {
+		return err
+	}
+	if listed == 0 {
+		return ErrFeedChanged
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO content(node, key, gen, rev, complete, fetched_at) VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node, key) DO UPDATE SET gen = excluded.gen, rev = excluded.rev,
@@ -578,21 +598,27 @@ func (s *Store) DropCopy(ctx context.Context, node, key string, gen int64) error
 }
 
 // CachedMessages returns messages of the copy in use with an ID above
-// after, in order, at most limit.
-func (s *Store) CachedMessages(ctx context.Context, node, key string, c Cached, after int64, limit int) ([]Message, error) {
+// after, in order: at most limit, and no more than fit into budget bytes,
+// but always one. more says whether the copy goes on.
+func (s *Store) CachedMessages(ctx context.Context, node, key string, c Cached, after int64, limit, budget int) ([]Message, bool, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, seq, sidechain, role, ts, text, truncated FROM messages
-		WHERE node = ? AND key = ? AND gen = ? AND id > ? ORDER BY id LIMIT ?`, node, key, c.gen, after, limit)
+		WHERE node = ? AND key = ? AND gen = ? AND id > ? ORDER BY id LIMIT ?`, node, key, c.gen, after, limit+1)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 	var out []Message
+	size := 0
 	for rows.Next() {
 		var m Message
 		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated); err != nil {
-			return nil, err
+			return nil, false, err
+		}
+		size += MessageSize(m)
+		if len(out) == limit || (size > budget && len(out) > 0) {
+			return out, true, nil
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	return out, false, rows.Err()
 }

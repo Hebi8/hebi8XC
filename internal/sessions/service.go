@@ -52,6 +52,40 @@ type Service struct {
 	refreshed time.Time
 	said      map[string]string // last message logged per subject
 	pulling   sync.Mutex        // one feed is read at a time
+	copying   map[string]*copyLock
+}
+
+// copyLock makes the copies of one session take turns.
+type copyLock struct {
+	sync.Mutex
+	waiting int
+}
+
+// lockCopy waits until no other copy of the session is under way and
+// returns the function that lets the next one in.
+func (s *Service) lockCopy(node, key string) (unlock func()) {
+	name := node + "\x00" + key
+	s.mu.Lock()
+	if s.copying == nil {
+		s.copying = make(map[string]*copyLock)
+	}
+	l := s.copying[name]
+	if l == nil {
+		l = new(copyLock)
+		s.copying[name] = l
+	}
+	l.waiting++
+	s.mu.Unlock()
+
+	l.Lock()
+	return func() {
+		l.Unlock()
+		s.mu.Lock()
+		if l.waiting--; l.waiting == 0 {
+			delete(s.copying, name)
+		}
+		s.mu.Unlock()
+	}
 }
 
 // say logs a message about a subject unless it is the one logged last.
@@ -141,20 +175,23 @@ type changesPage struct {
 }
 
 // messagesPage is the answer of GET /v1/sessions/messages between nodes.
+// Epoch and Rev say which feed, and which revision of the session in it,
+// the messages belong to.
 type messagesPage struct {
+	Epoch    string    `json:"epoch"`
 	Rev      int64     `json:"rev"`
 	Messages []Message `json:"messages"`
 	More     bool      `json:"more"`
 }
 
-// fit returns how many of the items fit into pageBudget bytes of JSON, at
+// fit returns how many of the items fit into PageBudget bytes of JSON, at
 // least one.
 func fit[T any](items []T) int {
 	size := 0
 	for n, item := range items {
 		raw, _ := json.Marshal(item)
 		size += len(raw) + 1
-		if size > pageBudget && n > 0 {
+		if size > PageBudget && n > 0 {
 			return n
 		}
 	}
@@ -162,7 +199,7 @@ func fit[T any](items []T) int {
 }
 
 // page cuts items, which were read with one more than limit to see whether
-// there are more, down to limit and to pageBudget.
+// there are more, down to limit and to PageBudget.
 func page[T any](items []T, limit int) ([]T, bool) {
 	more := len(items) > limit
 	if more {
@@ -207,6 +244,10 @@ func (s *Service) LocalMessages(ctx context.Context, key string, after int64, li
 	if s.Source == nil {
 		return messagesPage{}, ErrNotFound
 	}
+	epoch, err := s.Store.Epoch()
+	if err != nil {
+		return messagesPage{}, err
+	}
 	_, rev, ok, err := s.Store.Lookup(ctx, s.Self.ID, key)
 	if err != nil {
 		return messagesPage{}, err
@@ -214,15 +255,14 @@ func (s *Service) LocalMessages(ctx context.Context, key string, after int64, li
 	if !ok {
 		return messagesPage{}, ErrNotFound
 	}
-	msgs, err := s.Source.Messages(ctx, key, after, limit+1)
+	msgs, more, err := s.Source.Messages(ctx, key, after, limit, PageBudget)
 	if err != nil {
 		return messagesPage{}, err
 	}
-	msgs, more := page(msgs, limit)
 	if msgs == nil {
 		msgs = []Message{}
 	}
-	return messagesPage{Rev: rev, Messages: msgs, More: more}, nil
+	return messagesPage{Epoch: epoch, Rev: rev, Messages: msgs, More: more}, nil
 }
 
 // maxPullPages bounds one Pull. A feed longer than that is continued in
@@ -508,12 +548,13 @@ func (s *Service) Read(ctx context.Context, node, key string, after int64, limit
 	out := Reading{Session: entry(sess, n, nodes)}
 
 	var msgs []Message
+	var more bool
 	if n.Self {
 		if s.Source == nil {
 			return Reading{}, ErrNoIndex
 		}
 		out.From = "local"
-		if msgs, err = s.Source.Messages(ctx, key, after, limit+1); err != nil {
+		if msgs, more, err = s.Source.Messages(ctx, key, after, limit, PageBudget); err != nil {
 			return Reading{}, err
 		}
 	} else {
@@ -521,11 +562,10 @@ func (s *Service) Read(ctx context.Context, node, key string, after int64, limit
 		if err != nil {
 			return Reading{}, err
 		}
-		if msgs, err = s.Store.CachedMessages(ctx, n.ID, key, cp, after, limit+1); err != nil {
+		if msgs, more, err = s.Store.CachedMessages(ctx, n.ID, key, cp, after, limit, PageBudget); err != nil {
 			return Reading{}, err
 		}
 	}
-	msgs, more := page(msgs, limit)
 	if msgs == nil {
 		msgs = []Message{}
 	}
@@ -537,15 +577,21 @@ func (s *Service) Read(ctx context.Context, node, key string, after int64, limit
 }
 
 // copyOf returns the copy of another node's session to read from. If the
-// node can be reached and the copy is missing, partial or older than the
-// session, a new one is made first. If that is not possible, an older copy
-// is still better than nothing, and out says so.
+// node can be reached and there is no copy, or the session has changed
+// since it was made, a new one is made first. If that is not possible, an
+// older copy is still better than nothing, and out says so.
 func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, out *Reading) (Cached, error) {
+	// One copy of a session at a time. Whoever waited may find the copy
+	// that was just made.
+	defer s.lockCopy(n.ID, key)()
+
 	have, cached, err := s.Store.Cached(ctx, n.ID, key)
 	if err != nil {
 		return Cached{}, err
 	}
-	fresh := cached && have.Complete && have.Rev >= rev
+	// A copy that stops short of the end was cut at the size limit. While
+	// the session is the same, making it again would end the same way.
+	fresh := cached && have.Rev >= rev
 
 	why := "is offline"
 	if !fresh {
@@ -564,6 +610,11 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 				out.CachedAt = &at
 				out.Incomplete = !made.Complete
 				return made, nil
+			}
+			if errors.Is(err, ErrFeedChanged) {
+				// What is on record about this node is being replaced; an
+				// older copy went with it.
+				return Cached{}, fmt.Errorf("%s restarted its session feed; try again in a moment: %w", n.Name, err)
 			}
 			why = "did not answer (" + err.Error() + ")"
 		}
@@ -584,56 +635,87 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 
 // fetchCopy reads a whole session from the peer into a new copy and puts
 // it in use. The copy is written page by page, so its size in memory is
-// one page; its size on disk stops at maxCachedBytes.
-func (s *Service) fetchCopy(ctx context.Context, p Peer, key string) (Cached, error) {
+// one page. On disk it stops at maxCopyBytes, or after maxCopyPages
+// answers, and is then marked as not reaching the end. A copy that is not
+// put in use, for whatever reason, is removed again.
+func (s *Service) fetchCopy(ctx context.Context, p Peer, key string) (made Cached, err error) {
+	// The copy belongs to the feed as it is on record now. If the node
+	// starts a new feed while the copy is under way, revisions mean
+	// something else and the copy must not be kept.
+	feed, err := s.Store.Feed(ctx, p.ID)
+	if err != nil {
+		return Cached{}, err
+	}
 	gen, err := s.Store.NewCopy(ctx, p.ID, key)
 	if err != nil {
 		return Cached{}, err
 	}
+	defer func() {
+		if err != nil {
+			s.Store.DropCopy(context.WithoutCancel(ctx), p.ID, key, gen)
+		}
+	}()
+
 	var rev, after int64
 	size, complete := 0, false
-	for first := true; ; first = false {
+pages:
+	for n := 0; n < maxCopyPages; n++ {
 		var pg messagesPage
 		path := "/v1/sessions/messages?key=" + url.QueryEscape(key) +
 			"&after=" + strconv.FormatInt(after, 10) + "&limit=" + strconv.Itoa(MaxPage)
-		err := s.Fetch(ctx, p, path, &pg)
-		if err == nil && len(pg.Messages) > MaxPage {
-			err = errors.New("the answer is not a page of a session")
-		}
-		for i := range pg.Messages {
-			m := &pg.Messages[i]
-			if err == nil && m.ID <= after {
-				err = errors.New("the session does not go forward")
-			}
-			after = m.ID
-			if len(m.Text) > MaxText { // bytes; only then count characters
-				if r := []rune(m.Text); len(r) > MaxText {
-					m.Text, m.Truncated = string(r[:MaxText]), true
-				}
-			}
-			size += len(m.Text)
-		}
-		if err == nil {
-			err = s.Store.AddToCopy(ctx, p.ID, key, gen, pg.Messages)
-		}
-		if err != nil {
-			s.Store.DropCopy(context.WithoutCancel(ctx), p.ID, key, gen)
+		if err := s.Fetch(ctx, p, path, &pg); err != nil {
 			return Cached{}, err
 		}
-		if first {
+		if pg.Epoch != feed.Epoch {
+			return Cached{}, ErrFeedChanged
+		}
+		if len(pg.Messages) > MaxPage {
+			return Cached{}, errors.New("the answer is not a page of a session")
+		}
+		if n == 0 {
 			rev = pg.Rev
+		}
+		keep := pg.Messages[:0]
+		for _, m := range pg.Messages {
+			if m.ID <= after {
+				return Cached{}, errors.New("the session does not go forward")
+			}
+			after = m.ID
+			m = clampMessage(m)
+			if size += MessageSize(m); size > maxCopyBytes {
+				if err := s.Store.AddToCopy(ctx, p.ID, key, gen, keep); err != nil {
+					return Cached{}, err
+				}
+				break pages
+			}
+			keep = append(keep, m)
+		}
+		if err := s.Store.AddToCopy(ctx, p.ID, key, gen, keep); err != nil {
+			return Cached{}, err
 		}
 		if !pg.More || len(pg.Messages) == 0 {
 			complete = true
 			break
 		}
-		if size > maxCachedBytes {
-			break
-		}
 	}
-	if err := s.Store.UseCopy(ctx, p.ID, key, gen, rev, complete); err != nil {
+	if err := s.Store.UseCopy(ctx, p.ID, key, feed.Epoch, gen, rev, complete); err != nil {
 		return Cached{}, err
 	}
-	made, _, err := s.Store.Cached(ctx, p.ID, key)
+	made, _, err = s.Store.Cached(ctx, p.ID, key)
 	return made, err
+}
+
+// clampMessage cuts a message received from a peer to what one may hold.
+func clampMessage(m Message) Message {
+	if len(m.Text) > MaxText { // bytes; only then count characters
+		if r := []rune(m.Text); len(r) > MaxText {
+			m.Text, m.Truncated = string(r[:MaxText]), true
+		}
+	}
+	for _, f := range []*string{&m.Role, &m.Sidechain} {
+		if len(*f) > maxField {
+			*f = strings.ToValidUTF8((*f)[:maxField], "")
+		}
+	}
+	return m
 }

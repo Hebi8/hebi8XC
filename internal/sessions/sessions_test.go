@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -26,6 +27,7 @@ type memSource struct {
 	messages map[string][]Message
 	nextID   int64
 	err      error // if set, the index cannot be read
+	read     int   // messages handed out
 }
 
 func newSource() *memSource {
@@ -69,20 +71,27 @@ func (m *memSource) Sessions(context.Context) ([]Session, error) {
 	return out, nil
 }
 
-func (m *memSource) Messages(_ context.Context, key string, after int64, limit int) ([]Message, error) {
+func (m *memSource) Messages(_ context.Context, key string, after int64, limit, budget int) ([]Message, bool, error) {
 	if m.err != nil {
-		return nil, m.err
+		return nil, false, m.err
 	}
 	var out []Message
+	size := 0
 	for _, msg := range m.messages[key] {
-		if msg.ID > after && len(out) < limit {
-			if r := []rune(msg.Text); len(r) > MaxText {
-				msg.Text, msg.Truncated = string(r[:MaxText]), true
-			}
-			out = append(out, msg)
+		if msg.ID <= after {
+			continue
 		}
+		if r := []rune(msg.Text); len(r) > MaxText {
+			msg.Text, msg.Truncated = string(r[:MaxText]), true
+		}
+		size += MessageSize(msg)
+		if len(out) == limit || (size > budget && len(out) > 0) {
+			return out, true, nil
+		}
+		m.read++
+		out = append(out, msg)
 	}
-	return out, nil
+	return out, false, nil
 }
 
 // machine is a node's session service with an index in memory. Machines
@@ -574,7 +583,7 @@ func TestFailedCopyKeepsTheOldOne(t *testing.T) {
 	desk, laptop, net := pair(t)
 	// Enough text for three answers: a message is at most MaxText long.
 	var texts []string
-	for range 3 * pageBudget / MaxText {
+	for range 3 * PageBudget / MaxText {
 		texts = append(texts, strings.Repeat("x", MaxText))
 	}
 	texts = append(texts, "end")
@@ -617,7 +626,7 @@ func TestLongSessionsAndLongMessagesStayWithinTheLimits(t *testing.T) {
 	long := strings.Repeat("é", MaxText+10)
 	var texts []string
 	for i := range 40 {
-		texts = append(texts, strings.Repeat(string(rune('a'+i%26)), pageBudget/8))
+		texts = append(texts, strings.Repeat(string(rune('a'+i%26)), PageBudget/8))
 	}
 	texts = append(texts, long, "<end & done>")
 	desk.src.put("claude:big", "Big", 1000, texts...)
@@ -638,8 +647,8 @@ func TestLongSessionsAndLongMessagesStayWithinTheLimits(t *testing.T) {
 		t.Error("the copy is marked incomplete")
 	}
 	// 40 messages of an eighth of the budget each cannot travel in one answer.
-	if len(net.requests) < 6 {
-		t.Errorf("the session travelled in %d answers", len(net.requests))
+	if net.messageRequests() < 6 {
+		t.Errorf("the session travelled in %d answers", net.messageRequests())
 	}
 	// And the local machine pages its own reading the same way.
 	local, err := desk.Read(ctx, "desk", "claude:big", 0, MaxPage)
@@ -883,4 +892,304 @@ func TestRefreshRunsEveryFewRounds(t *testing.T) {
 	if len(desk.list(Query{}).Sessions) != 3 {
 		t.Error("the index was not read after a failed refresh")
 	}
+}
+
+// messageRequests counts the requests for messages in what was asked of peers.
+func (n *network) messageRequests() int {
+	count := 0
+	for _, path := range n.requests {
+		if strings.HasPrefix(path, "/v1/sessions/messages") {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *machine) cachedRows() int {
+	m.t.Helper()
+	var rows int
+	if err := m.Store.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&rows); err != nil {
+		m.t.Fatal(err)
+	}
+	return rows
+}
+
+// Two readers open the same session of another node at the same moment.
+// The second waits for the first one's copy instead of making its own, so
+// a failure of one can never take the other's copy with it.
+func TestConcurrentReadersShareOneCopy(t *testing.T) {
+	desk, laptop, net := pair(t)
+	desk.src.put("claude:a", "A", 1000, "one", "two", "three")
+	net.sync()
+
+	firstAsked, letFirst := make(chan struct{}), make(chan struct{})
+	firstDone := make(chan struct{})
+	var secondAsked atomic.Bool
+	asked := 0
+	net.before = func(path string) {
+		if !strings.HasPrefix(path, "/v1/sessions/messages") {
+			return
+		}
+		if asked++; asked == 1 {
+			close(firstAsked)
+			<-letFirst
+			return
+		}
+		// Only a second copy under way would ask again. Let it fail, after
+		// the first copy is in use: that is when it used to do damage.
+		secondAsked.Store(true)
+		<-firstDone
+		desk.online = false
+	}
+
+	type result struct {
+		texts []string
+		err   error
+	}
+	read := func(out chan<- result) {
+		texts, _, err := laptop.readAll("desk", "claude:a", 10)
+		out <- result{texts, err}
+	}
+	first, second := make(chan result, 1), make(chan result, 1)
+	go read(first)
+	<-firstAsked
+	go read(second)
+	// Wait until the second reader is where it will stay until the first is
+	// done: queued behind it, or, without the queue, asking desk itself.
+	for !secondAsked.Load() {
+		laptop.mu.Lock()
+		queued := 0
+		for _, l := range laptop.copying {
+			queued = l.waiting
+		}
+		laptop.mu.Unlock()
+		if queued == 2 {
+			break
+		}
+		runtime.Gosched()
+	}
+	close(letFirst)
+	if r := <-first; r.err != nil || len(r.texts) != 3 {
+		t.Fatalf("first reader: %v, %v", r.texts, r.err)
+	}
+	close(firstDone)
+	if r := <-second; r.err != nil || len(r.texts) != 3 {
+		t.Errorf("second reader: %v, %v", r.texts, r.err)
+	}
+
+	net.before, desk.online = nil, true
+	if secondAsked.Load() {
+		t.Error("the second reader made a copy of its own")
+	}
+	if rows := laptop.cachedRows(); rows != 3 {
+		t.Errorf("the copy in use has %d messages, want 3", rows)
+	}
+	if texts, r, err := laptop.readAll("desk", "claude:a", 10); err != nil || len(texts) != 3 || r.From != "cache" {
+		t.Errorf("reading afterwards: %v from %q, %v", texts, r.From, err)
+	}
+	if len(laptop.copying) != 0 {
+		t.Errorf("%d copy locks were left behind", len(laptop.copying))
+	}
+}
+
+// longSession gives desk a session that takes several answers to copy.
+func longSession(desk *machine, key string) (texts []string) {
+	for i := range 3 * PageBudget / MaxText {
+		texts = append(texts, fmt.Sprintf("%d:%s", i, strings.Repeat("x", MaxText-8)))
+	}
+	texts = append(texts, "end")
+	desk.src.put(key, "Long", 1000, texts...)
+	return texts
+}
+
+// While a session is being copied, its node starts a new feed. Revisions of
+// the old feed mean nothing in the new one, so the half-made copy is thrown
+// away, not kept under a revision that would make it look current.
+func TestCopyIsDroppedWhenTheFeedStartsOver(t *testing.T) {
+	desk, laptop, net := pair(t)
+	texts := longSession(desk, "claude:a")
+	for i := range 40 { // the old feed gets far ahead of where the new one will start
+		desk.src.put("claude:other", fmt.Sprintf("Edit %d", i), int64(i))
+		desk.SyncLocal(ctx)
+	}
+	net.sync()
+
+	asked := 0
+	net.before = func(path string) {
+		if !strings.HasPrefix(path, "/v1/sessions/messages") {
+			return
+		}
+		if asked++; asked == 2 { // between the first and the second answer
+			desk.Store.Close()
+			if err := os.Remove(filepath.Join(desk.dir, "sessions.db")); err != nil {
+				t.Fatal(err)
+			}
+			desk.open("d1", "desk")
+			desk.SyncLocal(ctx)
+			if err := laptop.Pull(ctx, Peer{ID: "d1", Name: "desk", Online: true, Addr: "d1"}); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	_, _, err := laptop.readAll("desk", "claude:a", 10)
+	if !errors.Is(err, ErrFeedChanged) || !strings.Contains(err.Error(), "desk restarted its session feed") {
+		t.Fatalf("reading across the restart: err = %v, want ErrFeedChanged", err)
+	}
+	if rows := laptop.cachedRows(); rows != 0 {
+		t.Errorf("%d messages of the abandoned copy were kept", rows)
+	}
+
+	net.before = nil
+	first, err := laptop.Read(ctx, "desk", "claude:a", 0, 10)
+	if err != nil || first.From != "peer" {
+		t.Fatalf("reading after the restart: from %q, %v; want a new copy", first.From, err)
+	}
+	got, r, err := laptop.readAll("desk", "claude:a", 10)
+	if err != nil || !slices.Equal(got, texts) || r.Stale || r.Incomplete {
+		t.Errorf("reading after the restart: %d of %d messages, stale %v, incomplete %v, %v",
+			len(got), len(texts), r.Stale, r.Incomplete, err)
+	}
+}
+
+// The session is deleted on its machine while it is being copied here.
+func TestCopyOfAVanishedSessionIsNotKept(t *testing.T) {
+	desk, laptop, net := pair(t)
+	longSession(desk, "claude:a")
+	net.sync()
+
+	asked := 0
+	net.before = func(path string) {
+		if strings.HasPrefix(path, "/v1/sessions/messages") {
+			if asked++; asked == 3 {
+				desk.src.remove("claude:a")
+				desk.SyncLocal(ctx)
+				if err := laptop.Pull(ctx, Peer{ID: "d1", Name: "desk", Online: true, Addr: "d1"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if _, _, err := laptop.readAll("desk", "claude:a", 10); err == nil {
+		t.Fatal("a session that was deleted meanwhile was read")
+	}
+	net.before = nil
+	if rows := laptop.cachedRows(); rows != 0 {
+		t.Errorf("%d messages of the deleted session were kept", rows)
+	}
+	var copies int
+	if err := laptop.Store.db.QueryRow(`SELECT COUNT(*) FROM content`).Scan(&copies); err != nil || copies != 0 {
+		t.Errorf("%d copies are on record (%v)", copies, err)
+	}
+}
+
+// limits sets the bounds of a copy for one test.
+func limits(t *testing.T, bytes, pages int) {
+	oldBytes, oldPages := maxCopyBytes, maxCopyPages
+	maxCopyBytes, maxCopyPages = bytes, pages
+	t.Cleanup(func() { maxCopyBytes, maxCopyPages = oldBytes, oldPages })
+}
+
+// A copy stops at its size limit, and the limit counts whole messages, not
+// just their text. A copy that was cut there is used as it is while the
+// session stays the same.
+func TestCopyStopsAtTheSizeLimit(t *testing.T) {
+	desk, laptop, net := pair(t)
+	empty := make([]string, 100) // messages without text still take room
+	desk.src.put("claude:a", "A", 1000, empty...)
+	net.sync()
+	limits(t, 2000, maxCopyPages)
+
+	got, r, err := laptop.readAll("desk", "claude:a", MaxPage)
+	if err != nil || !r.Incomplete || r.From != "peer" {
+		t.Fatalf("reading: %d messages, incomplete %v, from %q, %v", len(got), r.Incomplete, r.From, err)
+	}
+	if len(got) == 0 || len(got) >= 100 {
+		t.Fatalf("the copy holds %d of 100 messages, want it cut at the limit", len(got))
+	}
+	stored := 0
+	for _, m := range desk.src.messages["claude:a"][:len(got)] {
+		stored += MessageSize(m)
+	}
+	if stored > maxCopyBytes {
+		t.Errorf("the copy holds %d bytes, over the limit of %d", stored, maxCopyBytes)
+	}
+
+	// Reading again does not fetch again.
+	net.requests = nil
+	again, r, err := laptop.readAll("desk", "claude:a", MaxPage)
+	if err != nil || len(again) != len(got) || !r.Incomplete || r.From != "cache" || net.messageRequests() != 0 {
+		t.Errorf("second reading: %d messages, incomplete %v, from %q, %d requests, %v",
+			len(again), r.Incomplete, r.From, net.messageRequests(), err)
+	}
+	// It does once the session has changed.
+	desk.src.add("claude:a", "more")
+	net.sync()
+	net.requests = nil
+	if _, r, _ = laptop.readAll("desk", "claude:a", MaxPage); r.From != "peer" || net.messageRequests() == 0 {
+		t.Errorf("reading after a change: from %q, %d requests", r.From, net.messageRequests())
+	}
+}
+
+// A copy also stops after a number of answers, however little is in them.
+func TestCopyStopsAfterSoManyAnswers(t *testing.T) {
+	desk, laptop, net := pair(t)
+	desk.src.put("claude:a", "A", 1000, "x")
+	net.sync()
+	limits(t, maxCopyBytes, 5)
+
+	epoch, _ := desk.Store.Epoch()
+	served := 0
+	laptop.Fetch = func(_ context.Context, _ Peer, path string, out any) error {
+		// A session that hands out one small message per answer, 50 times.
+		served++
+		raw, _ := json.Marshal(messagesPage{Epoch: epoch, Rev: 1, More: served < 50,
+			Messages: []Message{{ID: int64(served), Seq: int64(served)}}})
+		return json.Unmarshal(raw, out)
+	}
+	got, r, err := laptop.readAll("desk", "claude:a", MaxPage)
+	if err != nil || served != 5 || len(got) != 5 || !r.Incomplete {
+		t.Errorf("%d answers were fetched, %d messages kept, incomplete %v, %v; want it to stop at 5",
+			served, len(got), r.Incomplete, err)
+	}
+}
+
+// A page is cut while it is read, not afterwards: the index is not asked
+// for hundreds of messages to send five.
+func TestPageOfALongSessionReadsOnlyWhatItSends(t *testing.T) {
+	desk, laptop, net := pair(t)
+	texts := make([]string, 300)
+	for i := range texts {
+		texts[i] = strings.Repeat("y", MaxText/2)
+	}
+	desk.src.put("claude:a", "A", 1000, texts...)
+	net.sync()
+
+	desk.src.read = 0
+	pg, err := desk.LocalMessages(ctx, "claude:a", 0, MaxPage)
+	if err != nil || !pg.More || len(pg.Messages) == 0 || len(pg.Messages) > 2*PageBudget/(MaxText/2) {
+		t.Fatalf("page: %d messages, more %v, %v", len(pg.Messages), pg.More, err)
+	}
+	if desk.src.read != len(pg.Messages) {
+		t.Errorf("the index handed out %d messages for a page of %d", desk.src.read, len(pg.Messages))
+	}
+	if got, _, err := laptop.readAll("desk", "claude:a", MaxPage); err != nil || len(got) != len(texts) {
+		t.Errorf("read %d of %d messages, %v", len(got), len(texts), err)
+	}
+}
+
+// Whatever the index cannot do right now, the feeds of the peers are read.
+func TestPeersAreReadWhenTheRefreshFails(t *testing.T) {
+	desk, laptop, net := pair(t)
+	laptop.src.put("claude:c", "On the laptop", 1)
+	laptop.SyncLocal(ctx)
+	desk.src.put("claude:a", "Indexed earlier", 2)
+	desk.Refresh = func(context.Context) (string, error) {
+		return "", errors.New("wake-cli refresh did not finish within 2m0s and was stopped")
+	}
+	desk.Round(ctx)
+	want := []string{"desk/claude:a=Indexed earlier", "laptop/claude:c=On the laptop"}
+	if got := titles(desk.list(Query{})); !slices.Equal(got, want) {
+		t.Errorf("after a refresh that failed, desk lists %v", got)
+	}
+	_ = net
 }
