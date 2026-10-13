@@ -40,6 +40,10 @@ const (
 	// does not answer. The gap doubles from Interval with every failure.
 	maxBackoff = 5 * time.Minute
 
+	// firstRemoteWait is how long the first round waits for the first fetch
+	// of a remote roster that has nothing cached.
+	firstRemoteWait = 10 * time.Second
+
 	// RemoteInterval is the time between refreshes of the remote roster.
 	// Reading it costs two requests out of the 60 per hour that GitHub
 	// allows an IP address without a token, and all nodes behind one
@@ -99,6 +103,7 @@ type Node struct {
 	peerSrv *http.Server
 	ctlSrv  *http.Server
 	kick    chan struct{}
+	after   func(time.Duration) <-chan time.Time // time.After, except in tests
 
 	mu      sync.Mutex
 	inbound map[string]string // node id -> address to call back
@@ -120,6 +125,7 @@ func New(cfg Config) (*Node, error) {
 		cfg:      cfg,
 		log:      cfg.Log,
 		kick:     make(chan struct{}, 1),
+		after:    time.After,
 		inbound:  make(map[string]string),
 		retries:  make(map[string]retry),
 		reported: make(map[string]string),
@@ -199,8 +205,14 @@ func (n *Node) Close() {
 func (n *Node) Run(ctx context.Context) {
 	n.Start()
 	defer n.Close()
+	n.run(ctx)
+}
+
+func (n *Node) run(ctx context.Context) {
 	if n.cfg.Remote != nil {
-		go n.keepRemoteFresh(ctx)
+		attempted := make(chan struct{})
+		go n.keepRemoteFresh(ctx, attempted)
+		n.awaitFirstRoster(ctx, attempted)
 	}
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
@@ -215,15 +227,37 @@ func (n *Node) Run(ctx context.Context) {
 	}
 }
 
+// awaitFirstRoster holds the first round back while the remote roster has
+// no keys cached and its first fetch is still under way. On a node's very
+// first start every other node of the account would otherwise fail the
+// trust check and be reported as a stranger, moments before the fetch
+// shows that it is not. A node with cached keys does not wait, and nobody
+// waits longer than firstRemoteWait.
+func (n *Node) awaitFirstRoster(ctx context.Context, attempted <-chan struct{}) {
+	if keys, _ := n.cfg.Remote.Keys(n.cfg.User); len(keys) > 0 {
+		return
+	}
+	select {
+	case <-attempted:
+	case <-n.after(firstRemoteWait):
+	case <-ctx.Done():
+	}
+}
+
 // keepRemoteFresh refreshes the remote roster at start and then every
-// RemoteInterval. It runs beside the rounds, so a slow or unreachable
-// GitHub never delays a heartbeat. Until the first refresh is done, and
-// whenever one fails, the roster's cache is what counts.
-func (n *Node) keepRemoteFresh(ctx context.Context) {
+// RemoteInterval, and closes attempted when the first try is over, however
+// it went. It runs beside the rounds, so a slow or unreachable GitHub never
+// delays a heartbeat. Whenever a refresh fails, the roster's cache is what
+// counts.
+func (n *Node) keepRemoteFresh(ctx context.Context, attempted chan<- struct{}) {
 	ticker := time.NewTicker(RemoteInterval)
 	defer ticker.Stop()
-	for {
-		if err := n.RefreshRemote(ctx); err != nil {
+	for first := true; ; first = false {
+		err := n.RefreshRemote(ctx)
+		if first {
+			close(attempted)
+		}
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}

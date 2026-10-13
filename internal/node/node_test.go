@@ -67,6 +67,8 @@ type testNode struct {
 	account int64
 	login   string
 	remote  *roster.GitHub
+
+	logs chan string // messages the node logs, if a test wants to follow them
 }
 
 func startNode(t *testing.T, c *clock, extra ...discovery.Source) *testNode {
@@ -121,13 +123,31 @@ func (tn *testNode) boot(listen string) {
 		Listener: ln,
 		Control:  ctl,
 		Now:      tn.clock.now,
-		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Log:      tn.logger(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	tn.Start()
 	t.Cleanup(tn.Close)
+}
+
+func (tn *testNode) logger() *slog.Logger {
+	if tn.logs == nil {
+		return slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	return slog.New(logToChan(tn.logs))
+}
+
+// logToChan is a log handler that hands every message from Info up to a test.
+type logToChan chan string
+
+func (h logToChan) Enabled(_ context.Context, level slog.Level) bool { return level >= slog.LevelInfo }
+func (h logToChan) WithAttrs([]slog.Attr) slog.Handler               { return h }
+func (h logToChan) WithGroup(string) slog.Handler                    { return h }
+func (h logToChan) Handle(_ context.Context, r slog.Record) error {
+	h <- r.Message
+	return nil
 }
 
 func (tn *testNode) restart() {
@@ -624,4 +644,140 @@ func TestRemoteRefreshNeedsALogin(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), ErrNoRemote.Error()) {
 		t.Errorf("err = %v, want %v", err, ErrNoRemote)
 	}
+}
+
+// firstStart is a logged-in node a about to run for real, next to a peer b
+// of the same account that already has the roster. GitHub answers a's
+// roster fetch only when the test says so, and the test owns the timer of
+// a's wait for that fetch.
+type firstStart struct {
+	a, b     *testNode
+	fetching chan struct{}      // a's fetch has reached GitHub
+	answer   func()             // lets GitHub answer it
+	waiting  chan time.Duration // a started waiting for its first fetch
+	timeout  chan time.Time     // send to end that wait
+}
+
+func newFirstStart(t *testing.T, cached bool) *firstStart {
+	t.Helper()
+	c := newClock()
+	fake := githubtest.New(t)
+	fake.AddAccount(4242, "alice")
+	answered := make(chan struct{})
+	s := &firstStart{
+		fetching: make(chan struct{}),
+		answer:   sync.OnceFunc(func() { close(answered) }),
+		waiting:  make(chan time.Duration, 1),
+		timeout:  make(chan time.Time),
+	}
+	s.a = &testNode{t: t, dir: t.TempDir(), clock: c, github: fake, account: 4242, login: "alice", logs: make(chan string, 64)}
+	s.a.boot("127.0.0.1:0")
+	fake.AddKey(4242, roster.KeyTitle(s.a.id.Name, s.a.id.ID), sshkey.Marshal(s.a.id.Public()))
+	s.b = loggedInNode(t, c, fake, 4242, "alice")
+	s.b.refreshRemote()
+	s.a.static = []string{s.b.addr}
+	if cached {
+		s.a.refreshRemote()
+	}
+
+	fake.Before("GET /users/{login}/ssh_signing_keys", func() {
+		select {
+		case s.fetching <- struct{}{}:
+			<-answered
+		case <-answered:
+		}
+	})
+	s.a.after = func(d time.Duration) <-chan time.Time {
+		s.waiting <- d
+		return s.timeout
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		s.a.run(ctx)
+		close(done)
+	}()
+	t.Cleanup(func() {
+		s.answer() // a test that failed early must not leave GitHub hanging
+		cancel()
+		<-done
+	})
+	return s
+}
+
+const (
+	strangerWarning = "found a node whose key is not in the roster"
+	startedWaiting  = "(waiting for the first fetch)"
+)
+
+// next returns what a does next: its next log message about a peer, or
+// startedWaiting when it begins to wait for its first roster fetch.
+func (s *firstStart) next() string {
+	for {
+		select {
+		case msg := <-s.a.logs:
+			if msg == "peer online" || strings.HasPrefix(msg, strangerWarning) {
+				return msg
+			}
+		case d := <-s.waiting:
+			if d != firstRemoteWait {
+				s.a.t.Errorf("waits %v, want %v", d, firstRemoteWait)
+			}
+			return startedWaiting
+		}
+	}
+}
+
+// On the very first start there is no roster cache. The first round waits
+// for the first fetch, so a peer of the same account is never reported as
+// a stranger just because the roster had not arrived yet.
+func TestFirstStartWaitsForTheRoster(t *testing.T) {
+	s := newFirstStart(t, false)
+
+	if got := s.next(); got != startedWaiting {
+		t.Fatalf("the node went ahead without the roster: %q", got)
+	}
+	<-s.fetching
+	if len(s.a.peers()) != 0 {
+		t.Fatal("a peer was recorded while the roster was still being fetched")
+	}
+
+	s.answer()
+	if got := s.next(); got != "peer online" {
+		t.Fatalf("first message about the peer is %q, want it online", got)
+	}
+	if !s.a.peer(s.b).Online {
+		t.Error("the peer is not online after the first round")
+	}
+}
+
+// The wait is bounded: with GitHub silent the node starts its rounds
+// anyway, and catches up when the roster does arrive.
+func TestFirstStartDoesNotWaitForever(t *testing.T) {
+	s := newFirstStart(t, false)
+	if got := s.next(); got != startedWaiting {
+		t.Fatalf("the node went ahead without the roster: %q", got)
+	}
+	<-s.fetching
+
+	s.timeout <- time.Time{}
+	if got := s.next(); !strings.HasPrefix(got, strangerWarning) {
+		t.Fatalf("after the wait ran out: %q, want a round without the roster", got)
+	}
+
+	s.answer()
+	if got := s.next(); got != "peer online" {
+		t.Fatalf("after the roster arrived: %q, want the peer online", got)
+	}
+}
+
+// With keys in the cache a start does not wait for GitHub at all.
+func TestStartWithACachedRosterDoesNotWait(t *testing.T) {
+	s := newFirstStart(t, true)
+
+	if got := s.next(); got != "peer online" {
+		t.Fatalf("the node's first step is %q, want the peer online from the cache", got)
+	}
+	<-s.fetching // the fetch is still unanswered: the round did not need it
 }
