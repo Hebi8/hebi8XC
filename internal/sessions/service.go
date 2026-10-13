@@ -25,16 +25,21 @@ const (
 
 // Peer is another node as the service needs to know it.
 type Peer struct {
-	ID     string
-	Name   string
-	Online bool
-	Addr   string // where it answered last; empty if it was never reached
+	ID       string
+	Name     string
+	Online   bool
+	Addr     string // where it answered last; empty if it was never reached
+	Protocol int    // the protocol version it speaks
+	Version  string // the build it runs, if it said
 }
 
 // Service is the session module of a node.
 type Service struct {
-	Self  Peer // this node; only ID and Name are used
+	Self  Peer // this node; ID, Name and Version are used
 	Store *Store
+	// Protocol is the protocol version this node speaks. Sessions are only
+	// exchanged with peers that speak the same one.
+	Protocol int
 	// Source is the session index of this machine, nil if it has none.
 	Source Source
 	// Refresh brings the index up to date and returns what the tool that
@@ -109,7 +114,7 @@ func (s *Service) say(level slog.Level, subject, msg string) {
 func (s *Service) Round(ctx context.Context) {
 	s.SyncLocal(ctx)
 	for _, p := range s.Peers() {
-		if !p.Online || p.Addr == "" || ctx.Err() != nil {
+		if !p.Online || p.Addr == "" || p.Protocol != s.Protocol || ctx.Err() != nil {
 			continue
 		}
 		if err := s.Pull(ctx, p); err != nil {
@@ -176,7 +181,7 @@ type changesPage struct {
 
 // messagesPage is the answer of GET /v1/sessions/messages between nodes.
 // Epoch and Rev say which feed, and which revision of the session in it,
-// the messages belong to.
+// the messages belong to. Epoch was added later and may be missing.
 type messagesPage struct {
 	Epoch    string    `json:"epoch"`
 	Rev      int64     `json:"rev"`
@@ -327,27 +332,33 @@ type Node struct {
 	Online   bool       `json:"online"`
 	SyncedAt *time.Time `json:"synced_at,omitempty"` // when its sessions were last read; not set for this node
 	Sessions int        `json:"sessions"`
+	Protocol int        `json:"protocol,omitempty"` // the protocol version it speaks, if it is a peer now
+	Version  string     `json:"version,omitempty"`  // the build it runs, if it said
+	// Incompatible means it speaks another protocol than this node, so its
+	// sessions are no longer read; what was read before is still shown.
+	Incompatible bool `json:"incompatible,omitempty"`
 }
 
 // Entry is one session in a listing.
 type Entry struct {
-	Ref         string    `json:"ref"` // what h8c show takes
-	NodeID      string    `json:"node_id"`
-	Node        string    `json:"node"`
-	Online      bool      `json:"online"`
-	Key         string    `json:"key"`
-	Agent       string    `json:"agent"`
-	Title       string    `json:"title"`
-	Project     string    `json:"project"`
-	ProjectPath string    `json:"project_path"`
-	Branch      string    `json:"branch,omitempty"`
-	Model       string    `json:"model,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	Messages    int64     `json:"messages"`
-	Parent      string    `json:"parent,omitempty"`
-	Spawned     bool      `json:"spawned,omitempty"`
-	Archived    bool      `json:"archived,omitempty"`
+	Ref          string    `json:"ref"` // what h8c show takes
+	NodeID       string    `json:"node_id"`
+	Node         string    `json:"node"`
+	Online       bool      `json:"online"`
+	Incompatible bool      `json:"incompatible,omitempty"`
+	Key          string    `json:"key"`
+	Agent        string    `json:"agent"`
+	Title        string    `json:"title"`
+	Project      string    `json:"project"`
+	ProjectPath  string    `json:"project_path"`
+	Branch       string    `json:"branch,omitempty"`
+	Model        string    `json:"model,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	Messages     int64     `json:"messages"`
+	Parent       string    `json:"parent,omitempty"`
+	Spawned      bool      `json:"spawned,omitempty"`
+	Archived     bool      `json:"archived,omitempty"`
 }
 
 // Listing is the answer to h8c sessions.
@@ -368,7 +379,7 @@ func (s *Service) nodes(ctx context.Context) (map[string]*Node, error) {
 		return nil, err
 	}
 	nodes := map[string]*Node{
-		s.Self.ID: {ID: s.Self.ID, Name: s.Self.Name, Self: true, Online: true},
+		s.Self.ID: {ID: s.Self.ID, Name: s.Self.Name, Self: true, Online: true, Protocol: s.Protocol, Version: s.Self.Version},
 	}
 	for id, f := range feeds {
 		if id == s.Self.ID {
@@ -388,6 +399,7 @@ func (s *Service) nodes(ctx context.Context) (map[string]*Node, error) {
 			nodes[p.ID] = n
 		}
 		n.Name, n.Online = p.Name, p.Online
+		n.Protocol, n.Version, n.Incompatible = p.Protocol, p.Version, p.Protocol != s.Protocol
 	}
 	for id, n := range nodes {
 		n.Sessions = counts[id]
@@ -470,7 +482,7 @@ func (s *Service) List(ctx context.Context, q Query) (Listing, error) {
 
 func entry(sess Session, n *Node, nodes map[string]*Node) Entry {
 	return Entry{
-		Ref: ref(n, nodes, sess.Key), NodeID: n.ID, Node: n.Name, Online: n.Online,
+		Ref: ref(n, nodes, sess.Key), NodeID: n.ID, Node: n.Name, Online: n.Online, Incompatible: n.Incompatible,
 		Key: sess.Key, Agent: sess.Agent, Title: sess.Title, Project: sess.Project,
 		ProjectPath: sess.ProjectPath, Branch: sess.Branch, Model: sess.Model,
 		CreatedAt: time.UnixMilli(sess.CreatedAt).UTC(), UpdatedAt: time.UnixMilli(sess.UpdatedAt).UTC(),
@@ -599,6 +611,10 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 			if p.ID != n.ID || !p.Online {
 				continue
 			}
+			if p.Protocol != s.Protocol {
+				why = fmt.Sprintf("speaks protocol %d while this node speaks %d", p.Protocol, s.Protocol)
+				break
+			}
 			if p.Addr == "" {
 				why = "cannot be reached from here"
 				break
@@ -666,7 +682,10 @@ pages:
 		if err := s.Fetch(ctx, p, path, &pg); err != nil {
 			return Cached{}, err
 		}
-		if pg.Epoch != feed.Epoch {
+		// A build from before the answer carried the epoch leaves it out.
+		// Then this check is skipped; UseCopy still compares the feed on
+		// record with the one the copy was started under.
+		if pg.Epoch != "" && pg.Epoch != feed.Epoch {
 			return Cached{}, ErrFeedChanged
 		}
 		if len(pg.Messages) > MaxPage {

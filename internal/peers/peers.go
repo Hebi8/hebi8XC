@@ -40,6 +40,23 @@ type Peer struct {
 	Addrs    []Addr    `json:"addrs"`
 	LastSeen time.Time `json:"last_seen"`
 	Online   bool      `json:"online,omitempty"` // runtime state, never stored
+
+	// Protocol and Version are what the peer said in its last hello. Both
+	// are empty for a peer that runs a build from before nodes said them.
+	Protocol int    `json:"protocol,omitempty"`
+	Version  string `json:"version,omitempty"`
+}
+
+// FirstProtocol is the protocol of every build that does not say which one
+// it speaks: they are all from before the field existed, and all speak 1.
+const FirstProtocol = 1
+
+// Speaks returns the protocol version the peer speaks.
+func (p Peer) Speaks() int {
+	if p.Protocol == 0 {
+		return FirstProtocol
+	}
+	return p.Protocol
 }
 
 // Contact is one authenticated exchange with a peer. Addr is empty when the
@@ -50,6 +67,9 @@ type Contact struct {
 	Key     string
 	Addr    string
 	Sources []string
+
+	Protocol int
+	Version  string
 }
 
 // Table is safe for concurrent use.
@@ -101,8 +121,8 @@ func (t *Table) Observe(c Contact) (cameOnline bool) {
 		t.peers[c.ID] = p
 		t.changed = true
 	}
-	if p.Name != c.Name || p.Key != c.Key {
-		p.Name, p.Key = c.Name, c.Key
+	if p.Name != c.Name || p.Key != c.Key || p.Protocol != c.Protocol || p.Version != c.Version {
+		p.Name, p.Key, p.Protocol, p.Version = c.Name, c.Key, c.Protocol, c.Version
 		t.changed = true
 	}
 	if merged := union(p.Sources, c.Sources); len(merged) != len(p.Sources) {

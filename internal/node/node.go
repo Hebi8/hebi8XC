@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Hebi8/hebi8XC/internal/buildinfo"
 	"github.com/Hebi8/hebi8XC/internal/discovery"
 	"github.com/Hebi8/hebi8XC/internal/identity"
 	"github.com/Hebi8/hebi8XC/internal/link"
@@ -25,6 +26,14 @@ import (
 	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
+
+// Protocol is the major version of what nodes say to each other: the hello,
+// the session feed and the reading of messages. Two builds with the same
+// Protocol work together, whatever their age. Within a version, fields are
+// only ever added, and a node does without a field its peer does not send.
+// Anything else is a new version. See "Protocol compatibility" in
+// docs/design.md.
+const Protocol = 1
 
 const (
 	DefaultPort = 4892
@@ -66,11 +75,15 @@ const (
 var ErrNoRemote = errors.New("this node is not logged in to GitHub")
 
 // Info is what two nodes tell each other in POST /v1/hello. Port is where
-// the sender listens, so the receiver can call back.
+// the sender listens, so the receiver can call back. Protocol and Version
+// are missing in the hello of a build from before they were added; such a
+// build speaks protocol 1.
 type Info struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Port int    `json:"port"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Port     int    `json:"port"`
+	Protocol int    `json:"protocol,omitempty"`
+	Version  string `json:"version,omitempty"`
 }
 
 // Status is the answer of GET /v1/status on the control socket.
@@ -81,6 +94,8 @@ type Status struct {
 	User       string `json:"user"`
 	NetworkTag string `json:"network_tag"`
 	Listen     string `json:"listen"`
+	Protocol   int    `json:"protocol"`
+	Version    string `json:"version"`
 }
 
 type Config struct {
@@ -117,6 +132,7 @@ type Node struct {
 	mu      sync.Mutex
 	inbound map[string]string // node id -> address to call back
 	retries map[string]retry  // addresses that did not answer
+	foreign map[string]int    // peers that speak another protocol, and which
 
 	// reported remembers the last trust problem logged per address, so a
 	// problem is logged once, not every round. Only Round touches it.
@@ -140,6 +156,7 @@ func New(cfg Config) (*Node, error) {
 		readable:     make(map[string]bool),
 		inbound:      make(map[string]string),
 		retries:      make(map[string]retry),
+		foreign:      make(map[string]int),
 		reported:     make(map[string]string),
 	}
 	trusted := cfg.Local
@@ -186,6 +203,7 @@ func New(cfg Config) (*Node, error) {
 		n.roundNow()
 	})
 	if svc := cfg.Sessions; svc != nil {
+		svc.Protocol = Protocol
 		svc.Peers, svc.Fetch = n.sessionPeers, n.fetchFromPeer
 		svc.PeerRoutes(peerMux)
 		svc.ControlRoutes(ctlMux)
@@ -203,7 +221,7 @@ func (n *Node) sessionPeers() []sessions.Peer {
 	list := n.cfg.Table.List()
 	out := make([]sessions.Peer, len(list))
 	for i, p := range list {
-		out[i] = sessions.Peer{ID: p.ID, Name: p.Name, Online: p.Online}
+		out[i] = sessions.Peer{ID: p.ID, Name: p.Name, Online: p.Online, Protocol: p.Speaks(), Version: p.Version}
 		var last time.Time
 		for _, a := range p.Addrs {
 			if out[i].Addr == "" || a.LastOK.After(last) {
@@ -564,16 +582,42 @@ func (n *Node) handleHello(w http.ResponseWriter, r *http.Request) {
 // observe records an authenticated contact. addr is the address we reached
 // the peer on, empty if the peer reached us; remote is only for the log.
 func (n *Node) observe(peer Info, key ed25519.PublicKey, addr string, sources []string, remote string) {
+	version := peer.Version
+	if len(version) > 64 {
+		version = version[:64]
+	}
 	cameOnline := n.cfg.Table.Observe(peers.Contact{
-		ID:      peer.ID,
-		Name:    peer.Name,
-		Key:     sshkey.Marshal(key),
-		Addr:    addr,
-		Sources: sources,
+		ID:       peer.ID,
+		Name:     peer.Name,
+		Key:      sshkey.Marshal(key),
+		Addr:     addr,
+		Sources:  sources,
+		Protocol: peer.Protocol,
+		Version:  version,
 	})
+	n.noteProtocol(peer)
 	if cameOnline {
 		n.log.Info("peer online", "name", peer.Name, "id", peer.ID, "remote", remote, "via", sources)
 	}
+}
+
+// noteProtocol says, once per peer and protocol, that a peer speaks another
+// protocol than this node. Such a peer is still found and still shown as
+// online; what the two cannot do is use each other's services.
+func (n *Node) noteProtocol(peer Info) {
+	speaks := peers.Peer{Protocol: peer.Protocol}.Speaks()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if speaks == Protocol {
+		delete(n.foreign, peer.ID)
+		return
+	}
+	if n.foreign[peer.ID] == speaks {
+		return
+	}
+	n.foreign[peer.ID] = speaks
+	n.log.Warn(fmt.Sprintf("%s speaks protocol %d and this node speaks %d: sessions are not exchanged with it until both run builds of the same protocol",
+		peer.Name, speaks, Protocol), "id", peer.ID, "version", peer.Version)
 }
 
 func (n *Node) port() int {
@@ -581,7 +625,8 @@ func (n *Node) port() int {
 }
 
 func (n *Node) info() Info {
-	return Info{ID: n.cfg.Identity.ID, Name: n.cfg.Identity.Name, Port: n.port()}
+	return Info{ID: n.cfg.Identity.ID, Name: n.cfg.Identity.Name, Port: n.port(),
+		Protocol: Protocol, Version: buildinfo.String()}
 }
 
 func (n *Node) status() Status {
@@ -592,5 +637,7 @@ func (n *Node) status() Status {
 		User:       n.cfg.User,
 		NetworkTag: discovery.NetworkTag(n.cfg.User),
 		Listen:     n.cfg.Listener.Addr().String(),
+		Protocol:   Protocol,
+		Version:    buildinfo.String(),
 	}
 }

@@ -100,11 +100,12 @@ func (m *memSource) Messages(_ context.Context, key string, after int64, limit, 
 // is between real nodes.
 type machine struct {
 	*Service
-	t      *testing.T
-	src    *memSource
-	net    *network
-	dir    string
-	online bool
+	t        *testing.T
+	src      *memSource
+	net      *network
+	dir      string
+	online   bool
+	protocol int // the protocol version this machine speaks
 }
 
 type network struct {
@@ -121,7 +122,7 @@ func newNetwork(t *testing.T) *network {
 
 func (n *network) machine(id, name string) *machine {
 	n.t.Helper()
-	m := &machine{t: n.t, src: newSource(), net: n, dir: n.t.TempDir(), online: true}
+	m := &machine{t: n.t, src: newSource(), net: n, dir: n.t.TempDir(), online: true, protocol: 1}
 	n.machines[id] = m
 	m.open(id, name)
 	return m
@@ -136,13 +137,14 @@ func (m *machine) open(id, name string) {
 	}
 	m.t.Cleanup(func() { store.Close() })
 	m.Service = &Service{
-		Self:   Peer{ID: id, Name: name},
-		Store:  store,
-		Source: m.src,
-		Peers:  func() []Peer { return m.net.peersOf(id) },
-		Fetch:  m.net.fetch,
-		Now:    func() time.Time { return m.net.now },
-		Log:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Self:     Peer{ID: id, Name: name},
+		Protocol: m.protocol,
+		Store:    store,
+		Source:   m.src,
+		Peers:    func() []Peer { return m.net.peersOf(id) },
+		Fetch:    m.net.fetch,
+		Now:      func() time.Time { return m.net.now },
+		Log:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 }
 
@@ -150,7 +152,7 @@ func (n *network) peersOf(id string) []Peer {
 	var out []Peer
 	for other, m := range n.machines {
 		if other != id {
-			out = append(out, Peer{ID: other, Name: m.Self.Name, Online: m.online, Addr: other})
+			out = append(out, Peer{ID: other, Name: m.Self.Name, Online: m.online, Addr: other, Protocol: m.protocol})
 		}
 	}
 	return out
@@ -1192,4 +1194,46 @@ func TestPeersAreReadWhenTheRefreshFails(t *testing.T) {
 		t.Errorf("after a refresh that failed, desk lists %v", got)
 	}
 	_ = net
+}
+
+// A peer starts speaking another protocol, as after an update to the next
+// major version. Its sessions are no longer read, but what is already here
+// stays, marked, and what was read before can still be read.
+func TestPeerThatMovedToAnotherProtocol(t *testing.T) {
+	desk, laptop, net := pair(t)
+	desk.src.put("claude:read", "Was read", 1000, "one", "two")
+	desk.src.put("claude:unread", "Never read", 2000, "three")
+	net.sync()
+	if _, _, err := laptop.readAll("desk", "claude:read", 10); err != nil {
+		t.Fatal(err)
+	}
+
+	desk.protocol = 2 // as laptop's hello now learns
+	desk.src.put("claude:new", "After the update", 3000)
+	net.requests = nil
+	laptop.Round(ctx)
+	if len(net.requests) != 0 {
+		t.Errorf("laptop asked a node of another protocol: %v", net.requests)
+	}
+
+	l := laptop.list(Query{})
+	if len(l.Sessions) != 2 || !l.Sessions[0].Incompatible || !l.Sessions[0].Online {
+		t.Fatalf("laptop lists %+v, want the two sessions it had, marked", l.Sessions)
+	}
+	if n := l.Nodes[1]; !n.Incompatible || n.Protocol != 2 || !n.Online || n.Sessions != 2 || n.SyncedAt == nil {
+		t.Errorf("desk in the listing = %+v", n)
+	}
+	if n := l.Nodes[0]; n.Incompatible || n.Protocol != 1 {
+		t.Errorf("laptop itself in the listing = %+v", n)
+	}
+
+	texts, r, err := laptop.readAll("desk", "claude:read", 10)
+	if err != nil || len(texts) != 2 || r.From != "cache" || len(net.requests) != 0 {
+		t.Errorf("reading the copy: %v from %q, requests %v, %v", texts, r.From, net.requests, err)
+	}
+	_, _, err = laptop.readAll("desk", "claude:unread", 10)
+	var notCached *NotCachedError
+	if !errors.As(err, &notCached) || !strings.Contains(err.Error(), "desk speaks protocol 2 while this node speaks 1") {
+		t.Errorf("reading what was never read: %v", err)
+	}
 }

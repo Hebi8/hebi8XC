@@ -1,0 +1,1 @@
+{"epoch":"831c54ae3a635dd2","rev":1,"messages":[{"id":1,"seq":1,"role":"user","time":1791803500000,"text":"the parser drops the last token"},{"id":2,"seq":2,"sidechain":"sc-1","role":"assistant","text":"a long answer, cut where the limit is","truncated":true}],"more":false}

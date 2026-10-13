@@ -1,0 +1,4 @@
+{
+  "sessions": "/v1/sessions?after=0&limit=500",
+  "messages": "/v1/sessions/messages?key=claude%3A0f3a9c&after=0&limit=500"
+}
