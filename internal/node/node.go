@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 	"github.com/Hebi8/hebi8XC/internal/link"
 	"github.com/Hebi8/hebi8XC/internal/peers"
 	"github.com/Hebi8/hebi8XC/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
@@ -55,6 +57,7 @@ const (
 	AccountFile      = "account.json"
 	GitHubRosterFile = "github_keys.json"
 	PeersFile        = "peers.json"
+	SessionsFile     = "sessions.db"
 	ControlSocket    = "control.sock"
 )
 
@@ -86,10 +89,13 @@ type Config struct {
 	// Local is re-read every round; it is a file on this machine. Remote
 	// is fetched over the network every RemoteInterval and may be nil.
 	// A key in either one is trusted.
-	Local    roster.Roster
-	Remote   roster.Roster
-	Table    *peers.Table
-	Sources  []discovery.Source
+	Local   roster.Roster
+	Remote  roster.Roster
+	Table   *peers.Table
+	Sources []discovery.Source
+	// Sessions is the session module. The node gives it the peers and the
+	// link, serves its routes and runs its rounds. Nil leaves it out.
+	Sessions *sessions.Service
 	Listener net.Listener // peer link, plain TCP; the node adds TLS
 	Control  net.Listener // control socket
 	Now      func() time.Time
@@ -104,6 +110,8 @@ type Node struct {
 	ctlSrv  *http.Server
 	kick    chan struct{}
 	after   func(time.Duration) <-chan time.Time // time.After, except in tests
+
+	sessionsKick chan struct{} // a peer came online: read its feed soon
 
 	mu      sync.Mutex
 	inbound map[string]string // node id -> address to call back
@@ -122,13 +130,15 @@ type retry struct {
 
 func New(cfg Config) (*Node, error) {
 	n := &Node{
-		cfg:      cfg,
-		log:      cfg.Log,
-		kick:     make(chan struct{}, 1),
-		after:    time.After,
-		inbound:  make(map[string]string),
-		retries:  make(map[string]retry),
-		reported: make(map[string]string),
+		cfg:   cfg,
+		log:   cfg.Log,
+		kick:  make(chan struct{}, 1),
+		after: time.After,
+
+		sessionsKick: make(chan struct{}, 1),
+		inbound:      make(map[string]string),
+		retries:      make(map[string]retry),
+		reported:     make(map[string]string),
 	}
 	trusted := cfg.Local
 	if cfg.Remote != nil {
@@ -173,8 +183,70 @@ func New(cfg Config) (*Node, error) {
 		}
 		n.roundNow()
 	})
+	if svc := cfg.Sessions; svc != nil {
+		svc.Peers, svc.Fetch = n.sessionPeers, n.fetchFromPeer
+		svc.PeerRoutes(peerMux)
+		svc.ControlRoutes(ctlMux)
+	}
 	n.ctlSrv = &http.Server{Handler: ctlMux}
 	return n, nil
+}
+
+// Sessions returns the session module, nil if the node has none.
+func (n *Node) Sessions() *sessions.Service { return n.cfg.Sessions }
+
+// sessionPeers lists the peers for the session module, each with the
+// address it answered on last.
+func (n *Node) sessionPeers() []sessions.Peer {
+	list := n.cfg.Table.List()
+	out := make([]sessions.Peer, len(list))
+	for i, p := range list {
+		out[i] = sessions.Peer{ID: p.ID, Name: p.Name, Online: p.Online}
+		var last time.Time
+		for _, a := range p.Addrs {
+			if out[i].Addr == "" || a.LastOK.After(last) {
+				out[i].Addr, last = a.Addr, a.LastOK
+			}
+		}
+	}
+	return out
+}
+
+// sessionFetchTimeout bounds one request of the session module to a peer.
+const sessionFetchTimeout = 30 * time.Second
+
+// fetchFromPeer gets a page from a peer over the link. An address can pass
+// from one node to another; the answer only counts if it comes from the
+// key the peer is known by.
+func (n *Node) fetchFromPeer(ctx context.Context, p sessions.Peer, path string, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, sessionFetchTimeout)
+	defer cancel()
+	key, err := n.client.Get(ctx, p.Addr, path, out, sessions.MaxReply)
+	if err != nil {
+		return err
+	}
+	for _, known := range n.cfg.Table.List() {
+		if known.ID == p.ID && known.Key == sshkey.Marshal(key) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s is now another node than %s", p.Addr, p.Name)
+}
+
+// sessionsLoop runs the rounds of the session module: at start, every
+// sessions.Interval, and soon after a peer comes online.
+func (n *Node) sessionsLoop(ctx context.Context) {
+	ticker := time.NewTicker(sessions.Interval)
+	defer ticker.Stop()
+	for {
+		n.cfg.Sessions.Round(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-n.sessionsKick:
+		}
+	}
 }
 
 // Start begins serving both listeners in the background.
@@ -213,6 +285,9 @@ func (n *Node) run(ctx context.Context) {
 		attempted := make(chan struct{})
 		go n.keepRemoteFresh(ctx, attempted)
 		n.awaitFirstRoster(ctx, attempted)
+	}
+	if n.cfg.Sessions != nil {
+		go n.sessionsLoop(ctx)
 	}
 	ticker := time.NewTicker(Interval)
 	defer ticker.Stop()
@@ -471,6 +546,10 @@ func (n *Node) observe(peer Info, key ed25519.PublicKey, addr string, sources []
 	})
 	if cameOnline {
 		n.log.Info("peer online", "name", peer.Name, "id", peer.ID, "remote", remote, "via", sources)
+		select {
+		case n.sessionsKick <- struct{}{}:
+		default:
+		}
 	}
 }
 

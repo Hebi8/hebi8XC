@@ -2,10 +2,12 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"net"
+	"net/url"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -22,6 +24,9 @@ import (
 	"github.com/Hebi8/hebi8XC/internal/link"
 	"github.com/Hebi8/hebi8XC/internal/peers"
 	"github.com/Hebi8/hebi8XC/internal/roster"
+	"github.com/Hebi8/hebi8XC/internal/sessions"
+	"github.com/Hebi8/hebi8XC/internal/sessions/wake"
+	"github.com/Hebi8/hebi8XC/internal/sessions/wake/waketest"
 	"github.com/Hebi8/hebi8XC/internal/sshkey"
 )
 
@@ -69,6 +74,12 @@ type testNode struct {
 	remote  *roster.GitHub
 
 	logs chan string // messages the node logs, if a test wants to follow them
+
+	// A node with a session index has a fake Wake database and the
+	// session module that reads it.
+	name     string // instead of the host name
+	wake     *waketest.DB
+	sessions *sessions.Service
 }
 
 func startNode(t *testing.T, c *clock, extra ...discovery.Source) *testNode {
@@ -85,6 +96,25 @@ func (tn *testNode) boot(listen string) {
 	var err error
 	if tn.id, err = identity.Load(tn.dir); err != nil {
 		t.Fatal(err)
+	}
+	if tn.name != "" {
+		tn.id.Name = tn.name
+	}
+	if tn.wake != nil {
+		store, err := sessions.OpenStore(filepath.Join(tn.dir, SessionsFile), tn.clock.now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { store.Close() })
+		index := wake.Open(tn.wake.Path)
+		t.Cleanup(index.Close)
+		tn.sessions = &sessions.Service{
+			Self:   sessions.Peer{ID: tn.id.ID, Name: tn.id.Name},
+			Store:  store,
+			Source: index,
+			Now:    tn.clock.now,
+			Log:    tn.logger(),
+		}
 	}
 	if tn.roster, err = roster.OpenFile(filepath.Join(tn.dir, RosterFile)); err != nil {
 		t.Fatal(err)
@@ -115,6 +145,7 @@ func (tn *testNode) boot(listen string) {
 		User:     cfg.User,
 		Local:    tn.roster,
 		Remote:   cfg.Remote,
+		Sessions: tn.sessions,
 		Table:    table,
 		Sources: append([]discovery.Source{
 			discovery.Func(discovery.Remembered, table.Addrs),
@@ -780,4 +811,240 @@ func TestStartWithACachedRosterDoesNotWait(t *testing.T) {
 		t.Fatalf("the node's first step is %q, want the peer online from the cache", got)
 	}
 	<-s.fetching // the fetch is still unanswered: the round did not need it
+}
+
+// sessionNode starts a node called name whose machine has a Wake index.
+func sessionNode(t *testing.T, c *clock, name string) *testNode {
+	t.Helper()
+	tn := &testNode{t: t, dir: t.TempDir(), clock: c, name: name, logs: make(chan string, 256)}
+	tn.wake = waketest.New(t, t.TempDir())
+	tn.boot("127.0.0.1:0")
+	return tn
+}
+
+// control asks the node what a tool on its machine would ask it.
+func (tn *testNode) control(path string, out any) error {
+	return control.Dial(filepath.Join(tn.dir, ControlSocket)).Get(context.Background(), path, out)
+}
+
+func (tn *testNode) listing(query string) sessions.Listing {
+	tn.t.Helper()
+	var l sessions.Listing
+	if err := tn.control("/v1/sessions?"+query, &l); err != nil {
+		tn.t.Fatal(err)
+	}
+	return l
+}
+
+func refs(l sessions.Listing) []string {
+	var out []string
+	for _, s := range l.Sessions {
+		state := "online"
+		if !s.Online {
+			state = "offline"
+		}
+		out = append(out, s.Ref+" "+state)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// Two machines, each with its own agent sessions: either lists and reads
+// the sessions of both, over the link, and keeps what it read for when the
+// other one is switched off.
+func TestSessionsOfAnotherNode(t *testing.T) {
+	c := newClock()
+	desk, laptop := sessionNode(t, c, "desk"), sessionNode(t, c, "laptop")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	desk.wake.Put(waketest.Session{Key: "claude:a1", Agent: "claude", Title: "Fix the parser", Project: "parser",
+		Path: "/home/alice/src/parser", UpdatedAt: 3000},
+		waketest.Message{Role: "user", Text: "the parser drops the last token"},
+		waketest.Message{Role: "assistant", Text: "found it: an off-by-one in the loop"})
+	desk.wake.Put(waketest.Session{Key: "codex:b2", Agent: "codex", Title: "Write the docs", Project: "docs", UpdatedAt: 2000},
+		waketest.Message{Role: "user", Text: "document the flags"})
+	// Wake on desk also mirrors a third machine over SSH. That is not desk's to share.
+	desk.wake.Put(waketest.Session{Key: "claude:otherbox:c3", Agent: "claude", Title: "From elsewhere", Host: "otherbox",
+		UpdatedAt: 9000}, waketest.Message{Role: "user", Text: "not desk's session"})
+	laptop.wake.Put(waketest.Session{Key: "claude:d4", Agent: "claude", Title: "Plan the trip", Project: "notes", UpdatedAt: 1000},
+		waketest.Message{Role: "user", Text: "tickets"})
+
+	laptop.static = []string{desk.addr}
+	laptop.round()
+	desk.round()
+	ctx := context.Background()
+	desk.sessions.Round(ctx)
+	laptop.sessions.Round(ctx)
+	desk.sessions.Round(ctx)
+
+	want := []string{"desk/claude:a1 online", "desk/codex:b2 online", "laptop/claude:d4 online"}
+	for _, n := range []*testNode{desk, laptop} {
+		if got := refs(n.listing("")); !slices.Equal(got, want) {
+			t.Errorf("%s lists %v, want %v", n.name, got, want)
+		}
+	}
+	if got := refs(laptop.listing("node=desk&agent=claude&text=parser")); !slices.Equal(got, want[:1]) {
+		t.Errorf("filtered listing = %v", got)
+	}
+
+	var r sessions.Reading
+	if err := laptop.control("/v1/sessions/messages?node=desk&key=claude:a1", &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.From != "peer" || len(r.Messages) != 2 || r.Messages[1].Text != "found it: an off-by-one in the loop" ||
+		r.Session.Title != "Fix the parser" || r.Session.ProjectPath != "/home/alice/src/parser" {
+		t.Fatalf("reading over the link = %+v", r)
+	}
+	if err := desk.control("/v1/sessions/messages?node=desk&key=claude:a1&limit=1", &r); err != nil || r.From != "local" ||
+		len(r.Messages) != 1 || r.Next == 0 {
+		t.Errorf("desk reading its own session = %+v, %v", r, err)
+	}
+
+	// desk is switched off.
+	synced := c.now()
+	desk.Close()
+	c.advance(OfflineAfter + time.Second)
+	laptop.round()
+	laptop.sessions.Round(ctx)
+
+	l := laptop.listing("")
+	if got := refs(l); !slices.Equal(got, []string{"desk/claude:a1 offline", "desk/codex:b2 offline", "laptop/claude:d4 online"}) {
+		t.Errorf("with desk off, laptop lists %v", got)
+	}
+	for _, n := range l.Nodes {
+		if n.Name == "desk" && (n.Online || n.SyncedAt == nil || !n.SyncedAt.Equal(synced) || n.Sessions != 2) {
+			t.Errorf("desk in the listing = %+v, want offline and as of %v", n, synced)
+		}
+	}
+	r = sessions.Reading{}
+	if err := laptop.control("/v1/sessions/messages?node=desk&key=claude:a1", &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.From != "cache" || len(r.Messages) != 2 || r.CachedAt == nil || !r.CachedAt.Equal(synced) {
+		t.Errorf("reading with desk off = from %q, %d messages, cached at %v", r.From, len(r.Messages), r.CachedAt)
+	}
+	err := laptop.control("/v1/sessions/messages?node=desk&key=codex:b2", &r)
+	if err == nil || !strings.Contains(err.Error(), "desk is offline") ||
+		!strings.Contains(err.Error(), "has not been read on this machine before") {
+		t.Errorf("reading what was never read, with desk off: %v", err)
+	}
+	if strings.HasPrefix(err.Error(), "GET ") {
+		t.Errorf("the error is not in plain words: %v", err)
+	}
+}
+
+// Only nodes in the roster get at the sessions, and only at those of the
+// machine itself.
+func TestSessionsAreForRosterMembersOnly(t *testing.T) {
+	c := newClock()
+	desk, laptop, stranger := sessionNode(t, c, "desk"), sessionNode(t, c, "laptop"), sessionNode(t, c, "stranger")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	stranger.trust(desk) // the stranger would like to; desk does not know it
+	desk.wake.Put(waketest.Session{Key: "claude:a1", Agent: "claude", Title: "Private", UpdatedAt: 1},
+		waketest.Message{Role: "user", Text: "private text"})
+	desk.wake.Put(waketest.Session{Key: "claude:otherbox:c3", Agent: "claude", Host: "otherbox", UpdatedAt: 2},
+		waketest.Message{Role: "user", Text: "mirrored text"})
+	ctx := context.Background()
+	desk.sessions.SyncLocal(ctx)
+
+	paths := []string{"/v1/sessions?after=0", "/v1/sessions/messages?key=claude:a1"}
+	for _, path := range paths {
+		var out json.RawMessage
+		if _, err := stranger.client.Get(ctx, desk.addr, path, &out, sessions.MaxReply); !errors.Is(err, link.ErrRejected) {
+			t.Errorf("stranger GET %s: err = %v, answer %s; want ErrRejected", path, err, out)
+		}
+		if _, err := laptop.client.Get(ctx, desk.addr, path, &out, sessions.MaxReply); err != nil ||
+			!strings.Contains(string(out), "claude:a1") && !strings.Contains(string(out), "private text") {
+			t.Errorf("laptop GET %s: %v, %s", path, err, out)
+		}
+		if strings.Contains(string(out), "otherbox") {
+			t.Errorf("GET %s shows a session desk only mirrors: %s", path, out)
+		}
+	}
+
+	// Not even a roster member reads what is not in the feed.
+	for _, key := range []string{"claude:otherbox:c3", "claude:nope", "../../etc/passwd", "claude:a1' OR '1'='1"} {
+		var out json.RawMessage
+		_, err := laptop.client.Get(ctx, desk.addr, "/v1/sessions/messages?key="+url.QueryEscape(key), &out, sessions.MaxReply)
+		var status *link.StatusError
+		if !errors.As(err, &status) || status.Status != 404 {
+			t.Errorf("key %q: err = %v, answer %s; want 404", key, err, out)
+		}
+	}
+
+	// The control socket's routes are not on the link.
+	var out json.RawMessage
+	if _, err := laptop.client.Get(ctx, desk.addr, "/v1/peers", &out, sessions.MaxReply); err == nil {
+		t.Errorf("the link answered a control route: %s", out)
+	}
+}
+
+// An index this version cannot read turns the session module off for this
+// machine, says so, and leaves the node as it is.
+func TestUnknownIndexOnlyTurnsLocalSessionsOff(t *testing.T) {
+	c := newClock()
+	desk, laptop := sessionNode(t, c, "desk"), sessionNode(t, c, "laptop")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	desk.wake.Put(waketest.Session{Key: "claude:a1", Agent: "claude", Title: "Unreadable here", UpdatedAt: 1})
+	desk.wake.Exec(`ALTER TABLE sessions RENAME COLUMN host TO origin`) // a Wake from the future
+	laptop.wake.Put(waketest.Session{Key: "claude:d4", Agent: "claude", Title: "Plan the trip", UpdatedAt: 2})
+
+	laptop.static = []string{desk.addr}
+	laptop.round()
+	desk.round()
+	if !desk.peer(laptop).Online || !laptop.peer(desk).Online {
+		t.Fatal("the nodes are not connected")
+	}
+	ctx := context.Background()
+	for range 2 {
+		laptop.sessions.Round(ctx)
+		desk.sessions.Round(ctx)
+	}
+
+	said := false
+	for len(desk.logs) > 0 {
+		if msg := <-desk.logs; strings.Contains(msg, "cannot make out the structure of the Wake index") {
+			if said {
+				t.Error("the same complaint was logged twice")
+			}
+			said = true
+		}
+	}
+	if !said {
+		t.Error("desk did not say that it cannot read its index")
+	}
+	for _, n := range []*testNode{desk, laptop} {
+		if got := refs(n.listing("")); !slices.Equal(got, []string{"laptop/claude:d4 online"}) {
+			t.Errorf("%s lists %v", n.name, got)
+		}
+	}
+}
+
+// An address may pass to another node of the same user. What comes from it
+// then is not filed under the node that used to be there.
+func TestSessionsFromTheWrongNodeAreRefused(t *testing.T) {
+	c := newClock()
+	desk, laptop, third := sessionNode(t, c, "desk"), sessionNode(t, c, "laptop"), sessionNode(t, c, "third")
+	for _, n := range []*testNode{desk, third} {
+		laptop.trust(n)
+		n.trust(laptop)
+	}
+	third.wake.Put(waketest.Session{Key: "claude:t1", Agent: "claude", Title: "Third's", UpdatedAt: 1})
+	laptop.static = []string{desk.addr, third.addr}
+	laptop.round()
+	ctx := context.Background()
+	third.sessions.SyncLocal(ctx)
+
+	var out json.RawMessage
+	moved := sessions.Peer{ID: desk.id.ID, Name: "desk", Online: true, Addr: third.addr}
+	if err := laptop.fetchFromPeer(ctx, moved, "/v1/sessions?after=0", &out); err == nil ||
+		!strings.Contains(err.Error(), "another node") {
+		t.Errorf("err = %v, want the answer refused", err)
+	}
+	right := sessions.Peer{ID: third.id.ID, Name: "third", Online: true, Addr: third.addr}
+	if err := laptop.fetchFromPeer(ctx, right, "/v1/sessions?after=0", &out); err != nil {
+		t.Errorf("fetching from the right node: %v", err)
+	}
 }
