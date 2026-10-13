@@ -44,10 +44,10 @@ type mdnsEntry struct {
 	at   time.Time
 }
 
-// StartMDNS announces and browses until ctx is done. It uses the one
-// interface that carries the default route, over IPv4.
+// StartMDNS announces and browses until ctx is done. It uses one LAN
+// interface, over IPv4.
 func StartMDNS(ctx context.Context, id string, port int, tag string) (*MDNSSource, error) {
-	iface, ip, err := primaryInterface()
+	iface, ip, err := mdnsInterface()
 	if err != nil {
 		return nil, err
 	}
@@ -146,31 +146,89 @@ func (s *MDNSSource) Candidates(context.Context) ([]Candidate, error) {
 	return out, nil
 }
 
-// primaryInterface returns the interface the OS routes multicast through and
-// its IPv4 address. Connecting a UDP socket sends nothing; it only asks the
-// routing table which local address would be used.
-func primaryInterface() (net.Interface, net.IP, error) {
-	conn, err := net.Dial("udp4", "224.0.0.251:5353")
-	if err != nil {
-		return net.Interface{}, nil, err
-	}
-	defer conn.Close()
-	ip := conn.LocalAddr().(*net.UDPAddr).IP
+// lanInterface is a network interface and the IP addresses on it.
+type lanInterface struct {
+	net.Interface
+	IPs []net.IP
+}
 
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return net.Interface{}, nil, err
+// lanAddr returns the address mDNS can use on the interface: a private
+// IPv4 address (10/8, 172.16/12, 192.168/16) on an interface that is up,
+// does multicast and is neither loopback nor point-to-point. That leaves
+// out VPN interfaces such as Tailscale's, whose addresses are in
+// 100.64.0.0/10. prefer is returned if it is one of the usable addresses.
+func (i lanInterface) lanAddr(prefer net.IP) (net.IP, bool) {
+	const need, never = net.FlagUp | net.FlagMulticast, net.FlagLoopback | net.FlagPointToPoint
+	if i.Flags&need != need || i.Flags&never != 0 {
+		return nil, false
 	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagMulticast == 0 {
+	var first net.IP
+	for _, ip := range i.IPs {
+		if ip.To4() == nil || !ip.IsPrivate() {
 			continue
 		}
+		if ip.Equal(prefer) {
+			return ip, true
+		}
+		if first == nil {
+			first = ip
+		}
+	}
+	return first, first != nil
+}
+
+// chooseMDNSInterface picks the one interface mDNS runs on, and the address
+// to announce. routed is the local address the OS would send multicast
+// from; the interface that has it is the choice whenever it is a LAN
+// interface, which is the usual case. Where the OS prefers something else,
+// a VPN for example, the choice is the LAN interface with the lowest index.
+func chooseMDNSInterface(ifaces []lanInterface, routed net.IP) (net.Interface, net.IP, bool) {
+	var best lanInterface
+	var bestIP net.IP
+	for _, i := range ifaces {
+		ip, ok := i.lanAddr(routed)
+		if !ok {
+			continue
+		}
+		if ip.Equal(routed) {
+			return i.Interface, ip, true
+		}
+		if bestIP == nil || i.Index < best.Index {
+			best, bestIP = i, ip
+		}
+	}
+	return best.Interface, bestIP, bestIP != nil
+}
+
+// mdnsInterface asks the OS for its interfaces and its multicast route and
+// chooses among them.
+func mdnsInterface() (net.Interface, net.IP, error) {
+	all, err := net.Interfaces()
+	if err != nil {
+		return net.Interface{}, nil, err
+	}
+	ifaces := make([]lanInterface, len(all))
+	for n, iface := range all {
+		ifaces[n].Interface = iface
 		addrs, _ := iface.Addrs()
 		for _, a := range addrs {
-			if ipnet, ok := a.(*net.IPNet); ok && ipnet.IP.Equal(ip) {
-				return iface, ip, nil
+			if ipnet, ok := a.(*net.IPNet); ok {
+				ifaces[n].IPs = append(ifaces[n].IPs, ipnet.IP)
 			}
 		}
 	}
-	return net.Interface{}, nil, errors.New("no multicast interface for " + ip.String())
+
+	// Connecting a UDP socket sends nothing; it only asks the routing table
+	// which local address would be used.
+	var routed net.IP
+	if conn, err := net.Dial("udp4", "224.0.0.251:5353"); err == nil {
+		routed = conn.LocalAddr().(*net.UDPAddr).IP
+		conn.Close()
+	}
+
+	iface, ip, ok := chooseMDNSInterface(ifaces, routed)
+	if !ok {
+		return net.Interface{}, nil, errors.New("no LAN interface that can do multicast")
+	}
+	return iface, ip, nil
 }

@@ -143,3 +143,66 @@ func TestMDNSCacheIsBoundedAndExpires(t *testing.T) {
 		t.Errorf("cache holds %d entries, want 2", got)
 	}
 }
+
+func fakeInterface(index int, flags net.Flags, ips ...string) lanInterface {
+	i := lanInterface{Interface: net.Interface{Index: index, Name: fmt.Sprintf("if%d", index), Flags: flags}}
+	for _, ip := range ips {
+		i.IPs = append(i.IPs, net.ParseIP(ip))
+	}
+	return i
+}
+
+func TestChooseMDNSInterface(t *testing.T) {
+	const (
+		lan      = net.FlagUp | net.FlagBroadcast | net.FlagMulticast
+		loopback = net.FlagUp | net.FlagLoopback | net.FlagMulticast
+		tunnel   = net.FlagUp | net.FlagPointToPoint | net.FlagMulticast
+	)
+	lo := fakeInterface(1, loopback, "127.0.0.1")
+	// Tailscale as Linux shows it, and as Windows does: a broadcast-style
+	// adapter that claims multicast.
+	tailscaleTun := fakeInterface(2, tunnel, "100.64.0.5")
+	tailscaleAdapter := fakeInterface(2, lan, "100.64.0.5", "fd7a:115c:a1e0::5")
+	wired := fakeInterface(7, lan, "fe80::1", "192.168.1.21")
+	wired2 := fakeInterface(12, lan, "192.168.1.22")
+	wifi := fakeInterface(4, lan, "192.168.1.23")
+	bridge := fakeInterface(3, lan, "172.17.0.1")
+	unplugged := fakeInterface(5, net.FlagBroadcast|net.FlagMulticast, "192.168.1.24")
+	noMulticast := fakeInterface(6, net.FlagUp|net.FlagBroadcast, "192.168.1.25")
+	public := fakeInterface(8, lan, "203.0.113.7")
+	publicAndPrivate := fakeInterface(9, lan, "203.0.113.8", "10.0.0.8")
+
+	for _, tc := range []struct {
+		name   string
+		ifaces []lanInterface
+		routed string
+		want   string // interface name and address, or "" for none
+	}{
+		{"the routed LAN interface, as on Linux and macOS",
+			[]lanInterface{lo, bridge, wifi, wired, tailscaleTun}, "192.168.1.21", "if7 192.168.1.21"},
+		{"the routed interface even when another LAN one has a lower index",
+			[]lanInterface{lo, bridge, wired}, "192.168.1.21", "if7 192.168.1.21"},
+		{"the route points at Tailscale: fall back to a LAN interface",
+			[]lanInterface{lo, tailscaleAdapter, wired, wired2, wifi}, "100.64.0.5", "if4 192.168.1.23"},
+		{"the same interfaces in another order give the same answer",
+			[]lanInterface{wired2, wifi, lo, wired, tailscaleAdapter}, "100.64.0.5", "if4 192.168.1.23"},
+		{"no route at all", []lanInterface{lo, wired2, wired}, "", "if7 192.168.1.21"},
+		{"the routed interface is down", []lanInterface{unplugged, wired}, "192.168.1.24", "if7 192.168.1.21"},
+		{"the routed interface cannot do multicast", []lanInterface{noMulticast, wired}, "192.168.1.25", "if7 192.168.1.21"},
+		{"the routed address is public: use the private one beside it",
+			[]lanInterface{publicAndPrivate, wired2}, "203.0.113.8", "if9 10.0.0.8"},
+		{"only Tailscale and loopback", []lanInterface{lo, tailscaleAdapter, tailscaleTun}, "100.64.0.5", ""},
+		{"nothing that qualifies",
+			[]lanInterface{lo, tailscaleTun, unplugged, noMulticast, public}, "203.0.113.7", ""},
+		{"no interfaces", nil, "", ""},
+	} {
+		iface, ip, ok := chooseMDNSInterface(tc.ifaces, net.ParseIP(tc.routed))
+		got := ""
+		if ok {
+			got = iface.Name + " " + ip.String()
+		}
+		if got != tc.want {
+			t.Errorf("%s: chose %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
