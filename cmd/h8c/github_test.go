@@ -337,3 +337,60 @@ func TestLoggedInMachinesConnect(t *testing.T) {
 		t.Errorf("the running laptop still accepts the removed key; desktop log:\n%s", &desktopLog)
 	}
 }
+
+func TestNameShowsAndSetsTheNodeName(t *testing.T) {
+	dir := t.TempDir()
+	before := h8c(t, dir, "id")
+	hostName := strings.TrimSpace(h8c(t, dir, "name"))
+	if !strings.Contains(before, "name    "+hostName+"\n") {
+		t.Fatalf("h8c name printed %q, h8c id:\n%s", hostName, before)
+	}
+
+	out := h8c(t, dir, "name", "living", "room", "box")
+	if out != "This node is now called \"living room box\".\n" {
+		t.Errorf("setting the name while logged out and stopped printed:\n%s", out)
+	}
+	if got := h8c(t, dir, "name"); got != "living room box\n" {
+		t.Errorf("h8c name = %q", got)
+	}
+	// Only the name changed.
+	want := strings.ReplaceAll(before, hostName, "living room box")
+	if got := h8c(t, dir, "id"); got != want {
+		t.Errorf("h8c id after the rename:\n%s\nwant:\n%s", got, want)
+	}
+
+	if got := h8c(t, dir, "name", "living room box"); !strings.Contains(got, "already called") {
+		t.Errorf("setting the same name printed:\n%s", got)
+	}
+	if err := h8cFails(t, dir, "name", " "); !strings.Contains(err.Error(), "empty") {
+		t.Errorf("empty name: %v", err)
+	}
+}
+
+// Changing the name does not reach out to GitHub or to the running node;
+// it says what is left to do.
+func TestNameSaysWhatStillShowsTheOldName(t *testing.T) {
+	fake := fakeGitHub(t)
+	dir := t.TempDir()
+	h8c(t, dir, "name", "laptop")
+	h8c(t, dir, "login")
+	oldTitle := fake.Keys(aliceID)[0].Title
+	if !strings.HasPrefix(oldTitle, "hebi8xc: laptop (") {
+		t.Fatalf("the key was registered as %q, want the name set before the login", oldTitle)
+	}
+
+	var logs bytes.Buffer
+	startUp(t, dir, &logs)
+	out := h8c(t, dir, "name", "desk")
+	for _, want := range []string{`now called "desk"`, "restart h8c up", keySettingsURL, "h8c login"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+	if keys := fake.Keys(aliceID); len(keys) != 1 || keys[0].Title != oldTitle {
+		t.Errorf("h8c name changed the keys on GitHub: %+v", keys)
+	}
+	if n := fake.Requests("POST /user/ssh_signing_keys") + fake.Requests("POST /login/device/code"); n != 2 {
+		t.Errorf("h8c name talked to GitHub: %d logins or registrations, want the 2 of the login", n)
+	}
+}

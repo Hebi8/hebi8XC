@@ -14,6 +14,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/Hebi8/hebi8XC/internal/datadir"
 )
 
 const (
@@ -78,6 +80,20 @@ func load(dir string) (*Identity, error) {
 		return nil, fmt.Errorf("%s: not an Ed25519 key", keyPath)
 	}
 	return &Identity{ID: in.ID, Name: in.Name, Key: key}, nil
+}
+
+// SetName changes the name of the identity stored in dir. The id and the
+// key stay as they are.
+func SetName(dir, name string) error {
+	ident, err := load(dir)
+	if err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(info{ID: ident.ID, Name: name}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return datadir.WriteFile(filepath.Join(dir, infoFile), append(raw, '\n'), 0o644)
 }
 
 // create never overwrites: the key file is created exclusively, and whoever

@@ -27,10 +27,13 @@ GOOS=windows GOARCH=amd64 go build -o dist/h8c.exe ./cmd/h8c
 On each machine, once:
 
 ```sh
+h8c name laptop   # optional: the node's name, the host name by default
 h8c login
 ```
 
-It prints a code to enter at `https://github.com/login/device`, then registers the node's public key on your GitHub account as an SSH signing key titled `hebi8xc: <name> (<id>)`. A signing key cannot log in to GitHub or push; it only says "this key is mine". No token is stored.
+`h8c login` prints a code to enter at `https://github.com/login/device`, then registers the node's public key on your GitHub account as an SSH signing key titled `hebi8xc: <name> (<id>)`. A signing key cannot log in to GitHub or push; it only says "this key is mine". No token is stored.
+
+The signing keys of an account, titles included, are public. Pick the name before logging in if the host name should not be seen. Renaming later does not change the title on GitHub: delete the key there and log in again.
 
 Then, on each machine:
 
@@ -80,6 +83,6 @@ Things to know:
 - One node runs per data directory; a second `h8c up` on the same directory exits.
 - mDNS only matches nodes of the same user. Logged in, that is the GitHub account. Not logged in, it is the OS user name, or `--user ID` if your machines use different names. A logged-in node and one that is not do not find each other over mDNS.
 - Without network, a node keeps using the keys it fetched last and says in its log how old they are.
-- State lives in the data directory (`--data-dir`, default `hebi8xc` under the OS config directory, e.g. `~/.config/hebi8xc`). The node name defaults to the host name and can be edited in `node.json`.
+- State lives in the data directory (`--data-dir`, default `hebi8xc` under the OS config directory, e.g. `~/.config/hebi8xc`). The node name defaults to the host name; `h8c name` shows and changes it.
 
 More in [docs/design.md](docs/design.md). What was checked about GitHub is in [docs/github-roster.md](docs/github-roster.md).

@@ -26,9 +26,9 @@ The **user id** names the user in the roster and in the network tag. On a node t
 
 ## Identity
 
-Created on first start, in the data directory, and never changed after:
+Created on first start, in the data directory. The id and the key never change:
 
-- `node.json`: node id (8 random bytes, hex) and name (host name by default).
+- `node.json`: node id (8 random bytes, hex) and name. The name is the host name until `h8c name` sets another; it is the one part that may change. A running node keeps the name it started with.
 - `node.key`: Ed25519 private key, PKCS#8 PEM, mode 600.
 
 Public keys are written in OpenSSH format (`ssh-ed25519 AAAA...`), the format GitHub uses for SSH signing keys.
@@ -64,13 +64,14 @@ Keys can only be listed by login, and after a rename the old login may belong to
 
 Of those, the node keys are the Ed25519 keys whose title starts with `hebi8xc: `. The keys the user signs commits with have other titles and are not nodes. The result is written to `github_keys.json` (mode 600), replaced in one step, and loaded from there at start. A cache file that cannot be read as one is ignored with a warning and replaced by the next refresh.
 
-The node refreshes at start and then every 15 minutes, beside the discovery rounds, so GitHub being slow does not delay a heartbeat. Without a token GitHub allows 60 requests per hour per IP address, shared by all nodes behind one router, and a conditional request that changes nothing still counts; 15 minutes is 8 requests per node and hour. `h8c roster refresh` makes the running node refresh now and returns when it has: a key that is no longer listed is refused from then on.
+The node refreshes at start and then every 15 minutes, beside the discovery rounds, so GitHub being slow does not delay a heartbeat. The one exception is a start with no cached keys, as on the first start after `h8c login`: the first round waits for the first fetch to end, at most 10 seconds, because until then every node of the account would fail the trust check and be logged as a stranger. Without a token GitHub allows 60 requests per hour per IP address, shared by all nodes behind one router, and a conditional request that changes nothing still counts; 15 minutes is 8 requests per node and hour. `h8c roster refresh` makes the running node refresh now and returns when it has: a key that is no longer listed is refused from then on.
 
 When a refresh fails, for lack of network or of requests, the node keeps the cached keys and logs how old they are. The cache does not expire.
 
 Consequences:
 
 - A machine that logs in is accepted by the nodes already running at their next refresh, at most 15 minutes later.
+- The title of a node's key holds the node's name and is public. `h8c name` does not touch GitHub; the title changes when the key is deleted there and `h8c login` registers it again.
 - Removing a machine means deleting its key on GitHub, then refreshing the others. GitHub's public list still showed a deleted key more than 20 seconds later in a test, so the removal is not immediate even with a refresh.
 - Whoever can add a signing key to the account can add a node.
 

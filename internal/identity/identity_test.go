@@ -98,3 +98,27 @@ func TestConcurrentFirstLoadsAgree(t *testing.T) {
 		}
 	}
 }
+
+func TestSetNameKeepsIDAndKey(t *testing.T) {
+	dir := t.TempDir()
+	before, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := SetName(dir, "laptop"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Name != "laptop" || after.ID != before.ID || !after.Key.Equal(before.Key) {
+		t.Errorf("after SetName: %+v, before: %+v", after, before)
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
+		t.Errorf("SetName left extra files: %v", entries)
+	}
+	if err := SetName(t.TempDir(), "laptop"); err == nil {
+		t.Error("SetName made up an identity in an empty directory")
+	}
+}

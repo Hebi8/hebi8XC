@@ -33,6 +33,7 @@ import (
 
 const usage = `usage: h8c [--data-dir DIR] <command>
 
+  name [NEW NAME]        show or set this node's name
   login                  log in to GitHub and register this node's key there
   up [--listen ADDR] [--peer HOST[:PORT]]... [--discover LIST] [--user ID]
                          run the node in the foreground
@@ -74,7 +75,7 @@ func run(args []string, out io.Writer) error {
 	switch args[0] {
 	case "peers":
 		return listPeers(*dataDir, out)
-	case "up", "id", "trust", "login", "roster":
+	case "up", "id", "name", "trust", "login", "roster":
 	default:
 		return fmt.Errorf("unknown command %q\n%s", args[0], usage)
 	}
@@ -88,6 +89,8 @@ func run(args []string, out io.Writer) error {
 		return up(*dataDir, args[1:])
 	case "id":
 		return showID(*dataDir, out)
+	case "name":
+		return nodeName(*dataDir, args[1:], out)
 	case "login":
 		return login(*dataDir, out)
 	case "roster":
@@ -289,6 +292,43 @@ func showID(dir string, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "id      %s\nname    %s\nkey     %s %s\ngithub  %s\n",
 		ident.ID, ident.Name, sshkey.Marshal(ident.Public()), ident.Name, account)
+	return nil
+}
+
+// nodeName shows the node's name or, given one, changes it. The name is
+// what other nodes list this one under and part of the title of its key on
+// GitHub.
+func nodeName(dir string, args []string, out io.Writer) error {
+	ident, err := identity.Load(dir)
+	if err != nil {
+		return err
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(out, ident.Name)
+		return nil
+	}
+	name := strings.TrimSpace(strings.Join(args, " "))
+	if name == "" {
+		return errors.New("the name cannot be empty")
+	}
+	if name == ident.Name {
+		fmt.Fprintf(out, "This node is already called %q.\n", name)
+		return nil
+	}
+	if err := identity.SetName(dir, name); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "This node is now called %q.\n", name)
+
+	var running node.Status
+	if control.Dial(filepath.Join(dir, node.ControlSocket)).Get(context.Background(), "/v1/status", &running) == nil {
+		fmt.Fprintln(out, "A node is running here under the old name; restart h8c up to use the new one.")
+	}
+	if _, loggedIn, err := github.LoadAccount(filepath.Join(dir, node.AccountFile)); err != nil {
+		return err
+	} else if loggedIn {
+		fmt.Fprintf(out, "On GitHub this node's key keeps the title it was registered under, old name included, and that title is public. To change it, delete the key at %s and run h8c login again.\n", keySettingsURL)
+	}
 	return nil
 }
 
