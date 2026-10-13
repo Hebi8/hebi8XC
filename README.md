@@ -89,6 +89,20 @@ Sessions of a machine that is off are still listed, as they were when it was las
 
 A machine without Wake still lists and reads the sessions of the others. The index is read-only to `h8c`, and it never leaves the machine as a whole: other nodes get the list of sessions, and the text of a session when someone reads it.
 
+## Web
+
+The same sessions in a browser: the machines, the list with filters and search, and a session to read. Read-only.
+
+```sh
+h8c web     # prints a link; open it in a browser on this machine
+```
+
+`h8c up` serves the page at `127.0.0.1:4893`. It is for a browser on the same machine and cannot be opened from another device; `--web` moves it to another loopback address, `--web none` turns it off. If the port is taken, the node runs without the page and says so in its log.
+
+The page shows private data, so it does not open by itself. The link from `h8c web` carries a token, kept in the data directory (`web.token`, readable by you only). The first time, the page trades the token for a cookie and goes on to an address without it; after that the cookie is enough for a month. A browser without it only gets a note telling you to run `h8c web`. To lock every browser out, stop the node, delete `web.token` and start it again.
+
+The page needs no network and loads nothing from elsewhere.
+
 ### Removing a machine
 
 Delete its `hebi8xc: ...` key at <https://github.com/settings/keys>, then run `h8c roster refresh` on the other machines, or wait for their next refresh. GitHub keeps listing a deleted key for a while, in a test for more than 20 seconds, so repeat the refresh if the key is still shown. There is no `h8c logout`.

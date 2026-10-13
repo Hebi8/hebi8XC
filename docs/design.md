@@ -185,6 +185,34 @@ Nothing is ever removed from the cache except what its machine deleted.
 
 On the control socket: `GET /v1/sessions` with `node`, `agent`, `project`, `since`, `text` (repeatable) and `limit` lists the sessions of all nodes, newest first, each with its node and whether that node is online, plus one entry per node with the time its sessions were last read. `GET /v1/sessions/messages` with `node`, `key`, `after` and `limit` reads a page of a session. `h8c sessions` and `h8c show` are these two calls; with `--json` they print the answer as it is, for programs. A session is named `NODE/KEY`, with the node's name where that is unambiguous and its id otherwise.
 
+## Web interface
+
+The node serves a page for a browser on the same machine (`internal/web`): the machines, the list of sessions, a session to read. It is read-only and it is the command line's twin: the page calls `GET /api/v1/sessions` and `GET /api/v1/sessions/messages`, which are the handlers of the control socket's routes of the same name, so the page and `h8c sessions`, `h8c show` get the same answers from the same code. Nothing else of the control socket is offered: no status, no peer list, nothing that writes. The files of the page are plain HTML, CSS and JavaScript, embedded in the binary; there is no build step and nothing is loaded from another server.
+
+`h8c up --web ADDR` sets the address, by default `127.0.0.1:4893`; `--web none` turns the page off. Only a loopback address is accepted. A port that is taken costs the page, not the node.
+
+A list of sessions is continued with a cursor: an answer that is not the last one carries `next`, and passing it as `after` gives the following page. The cursor is the position of the last session in the order of the list (update time, node, key), so a walk shows each session once. The same parameter exists on the control socket and as `h8c sessions --after`.
+
+### Who can read it
+
+What the page shows is private. A port on 127.0.0.1 is reachable by every program of the machine, and by every web page open in a browser on it. So:
+
+- **The Host header must name this server by a loopback address** (`127.0.0.1`, `localhost` or `[::1]`, with its port). A page that reaches the port under a name of its own, as with DNS rebinding, is refused.
+- **Every request for data must carry the token**, 32 random bytes kept in `web.token` in the data directory, mode 600, made on first use. `h8c web` prints `http://127.0.0.1:4893/?token=...`. The server answers that address by setting a cookie (`HttpOnly`, `SameSite=Strict`, valid a month) and redirecting to `/`, so the token leaves the address bar and the page's script never sees it. A program may send it as `Authorization: Bearer` instead. Without it the page is a note saying to run `h8c web`, and the API answers 401.
+- **No answer allows another origin to read it**: no CORS header is ever sent, and `Cross-Origin-Resource-Policy: same-origin` keeps other sites from embedding the answers. With `SameSite=Strict` the browser does not even send the cookie on a request another site started.
+- The token is never logged, and `Referrer-Policy: no-referrer` keeps addresses out of Referer headers. Answers are `Cache-Control: no-store`.
+- All routes are GET. Other methods are refused.
+
+### What it shows cannot be trusted
+
+Titles, project names, message text and node names come from session files and from other nodes. They may contain anything, markup and script included.
+
+- The page's script writes every such value as text (`textContent`), never as markup. It builds two things from message text, both as elements: fenced code blocks, and links for addresses that parse as `http:` or `https:`, opened in a new tab with `noopener noreferrer`.
+- The `Content-Security-Policy` is `default-src 'none'` with only this server's own script, style and requests allowed: no inline script or style, no other origin, no frames (`frame-ancestors 'none'`, `X-Frame-Options: DENY`), no forms, no `<base>`. If markup did get into the page, it could not run or call out.
+- `X-Content-Type-Options: nosniff` on everything.
+
+A test keeps the script free of the calls that turn strings into markup, and the page was opened in headless Chrome with a session whose title, text and node name try to run script: all of it showed as text.
+
 ## Control interface
 
 The running node listens on the Unix socket `control.sock` in the data directory (mode 600) and speaks HTTP: `GET /v1/status`, `GET /v1/peers`, `POST /v1/refresh` (re-read the local roster, answer, then run a round) and `POST /v1/roster/refresh` (fetch the GitHub roster, answer, then run a round). `h8c peers`, `h8c trust` and `h8c roster refresh` use it; the MCP server and desktop client will too.
@@ -205,6 +233,7 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 | `github_keys.json` | Cache of the GitHub roster |
 | `peers.json` | Node list |
 | `sessions.db` | Session feed of this node, copies of the others' feeds, cached messages (SQLite, mode 600) |
+| `web.token` | What opens the web interface (mode 600) |
 | `control.sock` | Control socket, while the node runs |
 | `lock` | Held by the running node |
 
@@ -226,5 +255,9 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 - Sessions: the marks for deleted sessions stay in the feed for good.
 - Sessions: an answer from a peer is limited by size, 8 MiB. That it holds at most 500 items is checked after it has been decoded, so a node that set out to could make a peer allocate far more memory than that. Nodes in the roster are the user's own and are trusted not to.
 - Sessions: a newer Wake may change its database. Then this machine's sessions stop being shared until the reader is updated.
+- Web: a cookie belongs to a host, not to a port. Another program that serves http on 127.0.0.1 and that this browser is pointed at gets the cookie sent along and could use it against the page's port. Processes of the same user can read the token file anyway; this matters for a server run by another user of the machine.
+- Web: the link from `h8c web` holds the token and stays in the browser's history. The token only changes when `web.token` is deleted and the node restarted; there is no log-out.
+- Web: a session that is updated while a list is being walked moves to the top and is not met again further down; the next refresh shows it.
+- Web: plain http. Fine on loopback, and the reason the page is not offered to other devices.
 - On Windows the private key file relies on the profile directory's ACL; there are no mode bits.
 - On Windows 11 `h8c id`, `login`, `up`, `peers` and `roster` have been run, with the control socket and the directory lock. mDNS has not been seen working there yet, and inbound connections need firewall rules that `h8c` does not create; see the README.
