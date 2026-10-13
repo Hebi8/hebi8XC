@@ -57,7 +57,10 @@ A running node reads the account's node keys from GitHub at start and every 15 m
 h8c roster           # the trusted keys and where each comes from
 h8c roster refresh   # fetch the GitHub list now
 h8c id               # this node's id, name, key and account
+h8c version          # this build and the protocol it speaks
 ```
+
+Machines do not have to run the same build. Update them one at a time, in any order: builds that speak the same protocol version work together, and `h8c peers` shows what each machine runs. If two ever speak different protocol versions, they still see each other, and `h8c peers` and `h8c sessions` say so with both numbers instead of failing.
 
 ## Agent sessions
 

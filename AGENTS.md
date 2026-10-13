@@ -19,6 +19,7 @@ GOOS=darwin go build ./... && GOOS=windows go build ./...   # must keep building
 ## Rules
 
 - Discovery carries no trust. Only a completed handshake in `internal/link` makes a peer.
+- Any two builds of the same protocol version must work together; nodes are updated one at a time. Within a version only add optional fields to what nodes say to each other, and handle their absence. Removing or renaming a field, making one required, or changing what one means needs the next version (`node.Protocol`). The samples in `internal/node/testdata/protocol-v1` are never edited to make a test pass, and `protocol_test.go` must stay green. "All machines must run the same build" is never an acceptable requirement.
 - Use TLS from the standard library. Do not write cryptographic protocols.
 - Never send a token or private key to a peer, and never put one in a discovery announcement.
 - Tests are deterministic: inject the clock, use fake sources and `t.TempDir()`, drive rounds by hand, never sleep, touch no network beyond loopback.

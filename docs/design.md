@@ -91,13 +91,29 @@ Every node runs an HTTPS server with mutual TLS 1.3 (`internal/link`). Calls bet
 - The client does not follow redirects, so only the node that passed the handshake can answer a call.
 - Request and reply bodies are capped at 64 KiB. A request has 10 s to arrive.
 
-`POST /v1/hello` is how nodes greet: both sides send `{id, name, port}`. A service is more routes on the same mux, as the [session module](#sessions) shows; a handler gets the caller's key from `link.PeerKey`.
+`POST /v1/hello` is how nodes greet: both sides send `{id, name, port, protocol, version}`. A service is more routes on the same mux, as the [session module](#sessions) shows; a handler gets the caller's key from `link.PeerKey`.
+
+### Protocol compatibility
+
+Machines are updated one at a time, so two nodes rarely run the same build. What nodes say to each other, the hello, the session feed and the reading of messages, has a **protocol version**, a whole number that starts at 1. The rule:
+
+- **Any two builds of the same protocol version work together.** Not "should": it is tested, see below.
+- Within a version the only change allowed is a new field that is optional. A node must do without any field its peer does not send, and ignores fields it does not know. Removing a field, renaming it, requiring a field that used to be optional or was not there, and changing what a field means are not allowed.
+- Anything else needs the next protocol version.
+
+Each node says its protocol version and its software version in the hello. A node that says neither runs a build from before these fields existed; all of those speak protocol 1 and are treated so. The node list keeps both values for every peer, and `h8c peers` shows them.
+
+When two nodes speak different versions, nothing fails mysteriously: they still find each other and show each other as online, the node logs once that the peer speaks protocol N while it speaks M, `h8c peers` and `h8c sessions` mark the peer as incompatible with both numbers, and no sessions are read from it. Sessions and copies that were read before stay and are shown.
+
+The samples in `internal/node/testdata/protocol-v1` are the requests and answers of build `3dc8c5a`, the last one before nodes said their version. Two tests hold the rule in place: this build must understand every one of those answers, and its own answers must still contain every field in them, with the same value for the same data. A change that breaks one of them is a new protocol version, not a reason to edit a sample.
+
+One field was added within version 1 so far: `epoch` in a page of messages. A reader that gets a page without it, from an older build, skips the comparison of that page's epoch with the feed on record. What is left is the check when the copy is put in use, which compares the feed on record then with the one the copy was started under. The case no longer caught at once is a node that starts a new feed in the middle of a copy and whose new feed this node has not read yet; the copy is then kept until that feed is read, which removes it.
 
 Default port: **4892** TCP (`h8xc` on a phone keypad).
 
 ## Node list
 
-One entry per node id, stored in `peers.json`: id, name, public key, known addresses (each with the sources that suggested it and when it last worked), all sources, time of last contact, online or offline.
+One entry per node id, stored in `peers.json`: id, name, public key, known addresses (each with the sources that suggested it and when it last worked), all sources, time of last contact, online or offline, and the protocol and software version it stated in its last hello.
 
 - A discovery round runs every 10 s: collect candidates, send hello to each address that is due, at most 16 at a time, record the answers. The round is also the heartbeat.
 - An address that does not answer is probed less often: the gap doubles from 20 s up to 5 min. An answer from it, or a hello from the peer behind it, puts it back on every round. A node that answers but fails the trust check stays on every round.
