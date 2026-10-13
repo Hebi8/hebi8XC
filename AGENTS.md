@@ -14,7 +14,11 @@ go test ./...                 # test (add -race when touching node, link or peer
 go vet ./...                  # vet
 gofmt -l .                    # must print nothing; fix with gofmt -w .
 GOOS=darwin go build ./... && GOOS=windows go build ./...   # must keep building
+go run ./scripts/websmoke     # the page in headless Chrome; run it after any change in internal/web/static
+go run ./scripts/demo         # three made-up machines to look at the page with; prints the link, Ctrl-C cleans up
 ```
+
+Both scripts build `h8c` from the working tree and run it in temporary directories on loopback ports of their own, with indexes made by `waketest`; they touch no installed node. `websmoke` needs Chrome (`-chrome PATH` if it is not on PATH) and is not part of `go test`. The demo holds about a hundred sessions of several agents and projects with English and Chinese titles, one of many pages, one with code blocks and long lines, an offline machine, and of that machine one session that was read before and others that cannot be read; `-port N` moves it from 24892–24895.
 
 ## Rules
 
@@ -28,4 +32,5 @@ GOOS=darwin go build ./... && GOOS=windows go build ./...   # must keep building
 - Tests build their own Wake index with `waketest` and never run `wake-cli` or open a real index. Real sessions are private: no title or text of one in a commit, a document or a report.
 - Keep dependencies few; say why when adding one.
 - Do not install `h8c` as a system service or touch other services on the machine when testing. Use temporary data directories and foreground processes, and clean up.
+- The page's script is not covered by `go test`: after a change in `internal/web/static`, `go run ./scripts/websmoke` has to pass. A new behavior of the page gets a check there.
 - Commits follow Conventional Commits.

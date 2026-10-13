@@ -211,7 +211,7 @@ Titles, project names, message text and node names come from session files and f
 - The `Content-Security-Policy` is `default-src 'none'` with only this server's own script, style and requests allowed: no inline script or style, no other origin, no frames (`frame-ancestors 'none'`, `X-Frame-Options: DENY`), no forms, no `<base>`. If markup did get into the page, it could not run or call out.
 - `X-Content-Type-Options: nosniff` on everything.
 
-A test keeps the script free of the calls that turn strings into markup, and the page was opened in headless Chrome with a session whose title, text and node name try to run script: all of it showed as text.
+A test keeps the script free of the calls that turn strings into markup. What the script does in a browser is checked by `go run ./scripts/websmoke`, which is not part of `go test`: it opens the page of a demo node in headless Chrome and checks that a session whose title, project, text and node name try to run script shows all of it as text, that "load more" is gone at the end of the list and of a session and nothing is shown twice, and that an answer which arrives late does not bring back the place in a list that is no longer asked for. `go run ./scripts/demo` starts the same demo to look at: three made-up machines on loopback, one of them offline.
 
 ## Control interface
 
