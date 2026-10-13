@@ -191,24 +191,34 @@
     return li;
   }
 
+  // forgetList is for when the filters change: the cursor belongs to the
+  // list on screen, which is no longer the one asked for. It is not used
+  // again, and there is nothing to continue until the new list is there.
+  function forgetList() {
+    listSeq++; // answers still on their way are for a list nobody waits for
+    next = '';
+    $('more').hidden = true;
+  }
+
   // loadList shows the first page of the list, or with more the next one.
   async function loadList(more) {
+    if (more && !next) return; // the list is at its end
+    const after = more ? next : '';
     const seq = ++listSeq;
     const f = filters();
-    const params = { ...f, limit: PAGE, after: more ? next : '' };
     $('more').disabled = true;
     let page;
     try {
-      page = await api('sessions', params);
+      page = await api('sessions', { ...f, limit: PAGE, after });
     } catch (err) {
       if (seq !== listSeq) return;
+      $('more').disabled = false; // only the newest request gives the button back
       $('list-note').hidden = false;
       $('list-note').textContent = T.failed(err.message);
       return;
-    } finally {
-      $('more').disabled = false;
     }
-    if (seq !== listSeq) return; // the filters changed meanwhile
+    if (seq !== listSeq) return; // another list was asked for meanwhile
+    $('more').disabled = false;
 
     showMachines(page.nodes);
     const rows = page.sessions.map(row);
@@ -302,6 +312,7 @@
 
   // read shows a session from its start, or with more its next page.
   async function read(node, key, more) {
+    if (more && !(open && open.next)) return; // the session is at its end
     const seq = ++readSeq;
     if (!more) {
       open = { node, key, next: 0 };
@@ -320,13 +331,13 @@
       r = await api('sessions/messages', { node, key, after: more ? open.next : 0, limit: PAGE });
     } catch (err) {
       if (seq !== readSeq) return;
+      $('more-messages').disabled = false;
       if (!more) $('title').textContent = key;
       $('notes').append(el('p', '', T.failed(err.message)));
       return;
-    } finally {
-      $('more-messages').disabled = false;
     }
     if (seq !== readSeq) return; // another session was opened meanwhile
+    $('more-messages').disabled = false;
 
     if (!more) {
       const s = r.session;
@@ -378,6 +389,8 @@
 
   let typing;
   $('filters').addEventListener('input', () => {
+    // From the first keystroke the list on screen is not the one asked for.
+    forgetList();
     clearTimeout(typing);
     typing = setTimeout(() => loadList(false), 250);
   });

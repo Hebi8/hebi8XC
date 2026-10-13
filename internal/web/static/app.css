@@ -106,7 +106,8 @@ summary { cursor: pointer; color: var(--dim); }
 #list .m span { flex: none; }
 #list .m .where { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 #list .m .grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-#more, #more-messages { display: block; margin: 0.75rem auto; }
+/* Not "display" on the id alone: that would show the button while it is hidden. */
+#more:not([hidden]), #more-messages:not([hidden]) { display: block; margin: 0.75rem auto; }
 
 #title { font-size: 1.15rem; margin: 0 0 0.2rem; overflow-wrap: anywhere; }
 #meta { color: var(--dim); font-size: 0.87rem; margin: 0 0 0.6rem; overflow-wrap: anywhere; }
