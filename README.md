@@ -60,7 +60,7 @@ h8c id               # this node's id, name, key and account
 h8c version          # this build and the protocol it speaks
 ```
 
-Machines do not have to run the same build. Update them one at a time, in any order: builds that speak the same protocol version work together, and `h8c peers` shows what each machine runs. If two ever speak different protocol versions, they still see each other, and `h8c peers` and `h8c sessions` say so with both numbers instead of failing.
+Machines do not have to run the same build. Update them one at a time, in any order: builds that speak the same protocol version work together, and `h8c peers` shows what each machine runs: a release by its version, a build from a checkout by the first characters of its commit (`h8c peers --json` has the whole version). If two ever speak different protocol versions, they still see each other, and `h8c peers` and `h8c sessions` say so with both numbers instead of failing.
 
 ## Agent sessions
 

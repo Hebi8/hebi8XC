@@ -18,7 +18,7 @@ go run ./scripts/websmoke     # the page in headless Chrome; run it after any ch
 go run ./scripts/demo         # three made-up machines to look at the page with; prints the link, Ctrl-C cleans up
 ```
 
-Both scripts build `h8c` from the working tree and run it in temporary directories on loopback ports of their own, with indexes made by `waketest`; they touch no installed node. `websmoke` needs Chrome (`-chrome PATH` if it is not on PATH) and is not part of `go test`. The demo holds about a hundred sessions of several agents and projects with English and Chinese titles, one of many pages, one with code blocks and long lines, an offline machine, and of that machine one session that was read before and others that cannot be read; `-port N` moves it from 24892–24895.
+Both scripts build `h8c` from the working tree and run it in temporary directories on loopback ports of their own, with indexes made by `waketest`; they touch no installed node. `websmoke` needs Chrome (`-chrome PATH` if it is not on PATH) and is not part of `go test`; with `-shots DIR` it also writes pictures of the page, narrow and wide, English and Chinese, to look at after a change of the layout (a directory under `/tmp`, never in the repository). The demo holds about a hundred sessions of several agents and projects with English and Chinese titles, one of many pages, one with code blocks and long lines, two projects with very long names, an offline machine, and of that machine one session that was read before and others that cannot be read; `-port N` moves it from 24892–24895.
 
 ## Rules
 
