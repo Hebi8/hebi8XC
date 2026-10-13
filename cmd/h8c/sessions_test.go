@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -186,7 +187,7 @@ func TestShowCommand(t *testing.T) {
 
 	// In pages, following what the output says.
 	first := h8c(t, laptop, "show", "desk/claude:a1", "--limit", "2")
-	_, more, ok := strings.Cut(first, "\nmore: h8c show desk/claude:a1 ")
+	_, more, ok := strings.Cut(first, "\nmore: h8c show 'desk/claude:a1' ")
 	if !ok || strings.Contains(first, "thanks, ship it") {
 		t.Fatalf("first page:\n%s", first)
 	}
@@ -275,19 +276,29 @@ func TestSince(t *testing.T) {
 func TestUpFindsTheIndexAndTheCLI(t *testing.T) {
 	ctx := context.Background()
 
+	// No index and no wake-cli: nothing to share, and the node says so.
+	// An index that is built later is found without a restart.
 	t.Run("neither index nor wake-cli", func(t *testing.T) {
 		dir := t.TempDir()
+		later := t.TempDir()
+		wakeDBs[dir] = filepath.Join(later, "wake.db")
 		var logs bytes.Buffer
 		n := startUp(t, dir, &logs)
-		if n.Sessions() == nil || n.Sessions().Source != nil {
-			t.Fatal("want the session module on, without an index of this machine")
-		}
-		if !strings.Contains(logs.String(), "sessions of this machine are not shared") {
-			t.Errorf("the node did not say so:\n%s", &logs)
-		}
 		n.Sessions().Round(ctx)
+		if !strings.Contains(logs.String(), "sessions of this machine are not shared") ||
+			!strings.Contains(logs.String(), "no Wake index at") {
+			t.Errorf("the node did not say that it has no index:\n%s", &logs)
+		}
 		if got := h8c(t, dir, "sessions"); !strings.Contains(got, ": 0 sessions, this node") {
 			t.Errorf("h8c sessions:\n%s", got)
+		}
+
+		db := waketest.New(t, later)
+		db.Put(waketest.Session{Key: "claude:a1", Agent: "claude", Title: "Indexed later", UpdatedAt: 1})
+		n.Sessions().Round(ctx)
+		if got := h8c(t, dir, "sessions"); !strings.Contains(got, "Indexed later") ||
+			!strings.Contains(got, ": 1 session, this node") {
+			t.Errorf("h8c sessions after the index appeared:\n%s", got)
 		}
 		if runtime.GOOS != "windows" {
 			if st, err := os.Stat(filepath.Join(dir, node.SessionsFile)); err != nil || st.Mode().Perm() != 0o600 {
@@ -323,4 +334,34 @@ func TestUpFindsTheIndexAndTheCLI(t *testing.T) {
 			t.Errorf("wake-cli was called with %q", raw)
 		}
 	})
+}
+
+// The hint for the next page is a command to paste. Whatever is in a
+// session's name, a shell takes the quoted name as that one argument.
+func TestQuotedNameSurvivesAShell(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX shell")
+	}
+	for _, name := range []string{
+		"desk/claude:a1",
+		"living room box/claude:a1",
+		"desk/claude:`touch pwned`",
+		"desk/claude:`date`",
+		"desk/first\nsecond",
+		"desk/claude:$(touch pwned)",
+		"desk/it's \"quoted\"",
+		"desk/two\nlines; rm -rf x",
+		"desk/back\\slash and *?[glob]",
+	} {
+		dir := t.TempDir()
+		cmd := exec.Command("sh", "-c", "printf %s "+quoteArg(name))
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil || string(out) != name {
+			t.Errorf("%q came out of the shell as %q (%v)", name, out, err)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("%q made the shell run something: %v", name, entries)
+		}
+	}
 }

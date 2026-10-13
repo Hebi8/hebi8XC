@@ -7,10 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -51,15 +49,12 @@ func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.L
 			return svc, closeAll, nil
 		}
 	}
-	cli, haveCLI := findWakeCLI(o.wakeCLI)
-	_, statErr := os.Stat(db)
-	switch {
-	case haveCLI:
+	if cli, ok := findWakeCLI(o.wakeCLI); ok {
 		svc.Refresh = wake.CLI{Bin: cli, DB: db}.Refresh
-	case errors.Is(statErr, fs.ErrNotExist):
-		log.Info("sessions of this machine are not shared: no Wake index and no wake-cli to build one", "index", db)
-		return svc, closeAll, nil
 	}
+	// The index is opened when it is read, every round anew while that
+	// fails. One that is built later, by Wake or by hand, is picked up
+	// without a restart; until then the module says that there is none.
 	index := wake.Open(db)
 	svc.Source = index
 	return svc, func() { index.Close(); store.Close() }, nil
@@ -254,10 +249,10 @@ func showSession(dir string, args []string, out io.Writer) error {
 	return nil
 }
 
-// quoteArg quotes a command line argument if a shell would split it.
+// quoteArg quotes a command line argument for a POSIX shell: in single
+// quotes nothing is special, and a single quote itself is written '\”.
+// Always, because the argument is a session name that came from a file on
+// some machine and ends up in a command the user is invited to paste.
 func quoteArg(arg string) string {
-	if strings.ContainsAny(arg, " \t'\"$&;|<>()*?") {
-		return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
-	}
-	return arg
+	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
 }
