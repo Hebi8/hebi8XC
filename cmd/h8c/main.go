@@ -20,6 +20,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Hebi8/hebi8XC/internal/buildinfo"
 	"github.com/Hebi8/hebi8XC/internal/control"
 	"github.com/Hebi8/hebi8XC/internal/datadir"
 	"github.com/Hebi8/hebi8XC/internal/discovery"
@@ -38,7 +39,7 @@ const usage = `usage: h8c [--data-dir DIR] <command>
   up [--listen ADDR] [--peer HOST[:PORT]]... [--discover LIST] [--user ID]
      [--wake-db PATH] [--wake-cli PATH]
                          run the node in the foreground
-  peers                  list the nodes the running node knows
+  peers [--json]         list the nodes the running node knows
   id                     show this node's id, name, public key and account
   sessions [--node N] [--agent A] [--project P] [--since WHEN] [--limit N] [--json] [TEXT]...
                          list the agent sessions of all nodes, newest first
@@ -49,6 +50,7 @@ const usage = `usage: h8c [--data-dir DIR] <command>
   trust add <key>        trust a node's public key by hand (the "key" line of h8c id)
   trust list             list the keys trusted by hand
   trust remove <key|comment|fingerprint>
+  version                show the version, commit and protocol of this h8c
 `
 
 func main() {
@@ -79,7 +81,9 @@ func run(args []string, out io.Writer) error {
 	}
 	switch args[0] {
 	case "peers":
-		return listPeers(*dataDir, out)
+		return listPeers(*dataDir, args[1:], out)
+	case "version":
+		return showVersion(out)
 	case "sessions":
 		return listSessions(*dataDir, args[1:], out)
 	case "show":
@@ -280,15 +284,54 @@ func openNode(ctx context.Context, dir string, o upOptions, log *slog.Logger) (*
 	return n, release, nil
 }
 
-func listPeers(dir string, out io.Writer) error {
-	var list []peers.Peer
-	err := control.Dial(filepath.Join(dir, node.ControlSocket)).Get(context.Background(), "/v1/peers", &list)
-	if err != nil {
+// showVersion prints which build this is and which protocol it speaks.
+func showVersion(out io.Writer) error {
+	commit := buildinfo.Commit()
+	if commit == "" {
+		commit = "unknown"
+	}
+	fmt.Fprintf(out, "h8c %s\ncommit %s\nprotocol %d\n", buildinfo.Version(), commit, node.Protocol)
+	return nil
+}
+
+// peerView is a peer as h8c peers --json prints it: what the node keeps
+// about it, the protocol it speaks even if it did not say, and whether
+// that is the protocol of this node.
+type peerView struct {
+	peers.Peer
+	Protocol   int  `json:"protocol"`
+	Compatible bool `json:"compatible"`
+}
+
+func listPeers(dir string, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("h8c peers", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	ctl := control.Dial(filepath.Join(dir, node.ControlSocket))
+	var self node.Status
+	if err := ctl.Get(context.Background(), "/v1/status", &self); err != nil {
+		return err
+	}
+	var list []peers.Peer
+	if err := ctl.Get(context.Background(), "/v1/peers", &list); err != nil {
+		return err
+	}
+	views := make([]peerView, len(list))
+	for i, p := range list {
+		views[i] = peerView{Peer: p, Protocol: p.Speaks(), Compatible: p.Speaks() == self.Protocol}
+	}
+	if *asJSON {
+		return printJSON(out, struct {
+			Self  node.Status `json:"self"`
+			Peers []peerView  `json:"peers"`
+		}{self, views})
+	}
+
 	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tID\tSTATE\tLAST SEEN\tVIA\tADDRESSES")
-	for _, p := range list {
+	fmt.Fprintln(tw, "NAME\tID\tSTATE\tLAST SEEN\tVIA\tBUILD\tADDRESSES")
+	for _, p := range views {
 		state := "offline"
 		if p.Online {
 			state = "online"
@@ -298,10 +341,24 @@ func listPeers(dir string, out io.Writer) error {
 			addrs[i] = a.Addr
 		}
 		slices.Sort(addrs)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, p.ID, state,
-			p.LastSeen.Local().Format(time.DateTime), strings.Join(p.Sources, ","), strings.Join(addrs, " "))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", p.Name, p.ID, state,
+			p.LastSeen.Local().Format(time.DateTime), strings.Join(p.Sources, ","),
+			build(p.Version, p.Protocol, self.Protocol), strings.Join(addrs, " "))
 	}
 	return tw.Flush()
+}
+
+// build describes the build a peer runs. A peer that did not say runs one
+// from before nodes reported their version; those all speak protocol 1.
+func build(version string, speaks, ours int) string {
+	if version == "" {
+		version = "unknown"
+	}
+	text := fmt.Sprintf("%s, protocol %d", version, speaks)
+	if speaks != ours {
+		text += fmt.Sprintf(" (incompatible: this node speaks %d)", ours)
+	}
+	return text
 }
 
 func showID(dir string, out io.Writer) error {

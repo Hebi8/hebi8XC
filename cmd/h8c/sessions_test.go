@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/node"
+	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"github.com/Hebi8/hebi8XC/internal/sessions/wake/waketest"
 )
 
@@ -143,16 +144,22 @@ func TestSessionsJSON(t *testing.T) {
 		slices.Sort(out)
 		return out
 	}
-	if f := fields(got.Nodes[0]); !slices.Equal(f, []string{"id", "name", "online", "self", "sessions"}) {
-		t.Errorf("this node has fields %v", f)
+	// Fields may be added over time; these must stay.
+	has := func(what string, m map[string]any, want ...string) {
+		t.Helper()
+		for _, field := range want {
+			if !slices.Contains(fields(m), field) {
+				t.Errorf("%s lacks %q; it has %v", what, field, fields(m))
+			}
+		}
 	}
-	if f := fields(got.Nodes[1]); !slices.Equal(f, []string{"id", "name", "online", "sessions", "synced_at"}) {
-		t.Errorf("the other node has fields %v", f)
-	}
+	has("this node", got.Nodes[0], "id", "name", "online", "self", "sessions", "protocol", "version")
+	has("the other node", got.Nodes[1], "id", "name", "online", "sessions", "synced_at", "protocol", "version")
 	s := got.Sessions[0]
-	if f := fields(s); !slices.Equal(f, []string{"agent", "branch", "created_at", "key", "messages", "model", "node",
-		"node_id", "online", "project", "project_path", "ref", "title", "updated_at"}) {
-		t.Errorf("a session has fields %v", f)
+	has("a session", s, "agent", "branch", "created_at", "key", "messages", "model", "node",
+		"node_id", "online", "project", "project_path", "ref", "title", "updated_at")
+	if got.Nodes[1]["protocol"] != float64(node.Protocol) || got.Nodes[1]["incompatible"] != nil {
+		t.Errorf("the other node = %v", got.Nodes[1])
 	}
 	for field, want := range map[string]any{"ref": "desk/claude:a1", "node": "desk", "online": true, "key": "claude:a1",
 		"agent": "claude", "title": "Fix the parser", "project": "parser", "project_path": "/home/alice/src/parser",
@@ -362,6 +369,79 @@ func TestQuotedNameSurvivesAShell(t *testing.T) {
 		}
 		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
 			t.Errorf("%q made the shell run something: %v", name, entries)
+		}
+	}
+}
+
+func TestVersionCommand(t *testing.T) {
+	out := h8c(t, t.TempDir(), "version")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	// A test binary carries no version; a built one says more in the same places.
+	if len(lines) != 3 || lines[0] != "h8c devel" || lines[1] != "commit unknown" || lines[2] != "protocol 1" {
+		t.Errorf("h8c version:\n%s", out)
+	}
+}
+
+func TestPeersShowsWhatEachPeerRuns(t *testing.T) {
+	desk, laptop, _ := twoMachines(t)
+
+	out := h8c(t, laptop, "peers")
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "BUILD") || !strings.Contains(lines[1], "devel, protocol 1") ||
+		strings.Contains(lines[1], "incompatible") || !strings.HasPrefix(lines[1], "desk ") {
+		t.Errorf("h8c peers:\n%s", out)
+	}
+
+	var got struct {
+		Self  map[string]any   `json:"self"`
+		Peers []map[string]any `json:"peers"`
+	}
+	raw := h8c(t, laptop, "peers", "--json")
+	if err := json.Unmarshal([]byte(raw), &got); err != nil {
+		t.Fatalf("%v\n%s", err, raw)
+	}
+	if got.Self["name"] != "laptop" || got.Self["protocol"] != float64(1) || got.Self["version"] != "devel" {
+		t.Errorf("self = %v", got.Self)
+	}
+	if len(got.Peers) != 1 {
+		t.Fatalf("peers:\n%s", raw)
+	}
+	p := got.Peers[0]
+	for field, want := range map[string]any{"name": "desk", "online": true, "protocol": float64(1),
+		"version": "devel", "compatible": true} {
+		if p[field] != want {
+			t.Errorf("peer %s = %v, want %v\n%s", field, p[field], want, raw)
+		}
+	}
+	for _, field := range []string{"id", "key", "addrs", "sources", "last_seen"} {
+		if p[field] == nil {
+			t.Errorf("peer lacks %q:\n%s", field, raw)
+		}
+	}
+	_ = desk
+}
+
+func TestBuildColumn(t *testing.T) {
+	for _, tc := range []struct {
+		version      string
+		speaks, ours int
+		want         string
+	}{
+		{"v0.3.1", 1, 1, "v0.3.1, protocol 1"},
+		{"", 1, 1, "unknown, protocol 1"}, // a build from before nodes said what they run
+		{"v2.0.0", 2, 1, "v2.0.0, protocol 2 (incompatible: this node speaks 1)"},
+	} {
+		if got := build(tc.version, tc.speaks, tc.ours); got != tc.want {
+			t.Errorf("build(%q, %d, %d) = %q, want %q", tc.version, tc.speaks, tc.ours, got, tc.want)
+		}
+	}
+	// And the same in the lines of h8c sessions.
+	for n, want := range map[*sessions.Node]string{
+		{Online: true, Incompatible: true, Protocol: 2}: "protocol incompatible (it speaks 2, this node 1), never read",
+		{Self: true}: "this node",
+	} {
+		if got := nodeState(*n, 1); got != want {
+			t.Errorf("nodeState(%+v) = %q, want %q", *n, got, want)
 		}
 	}
 }

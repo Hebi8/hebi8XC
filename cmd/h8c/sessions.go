@@ -15,6 +15,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/Hebi8/hebi8XC/internal/buildinfo"
 	"github.com/Hebi8/hebi8XC/internal/control"
 	"github.com/Hebi8/hebi8XC/internal/identity"
 	"github.com/Hebi8/hebi8XC/internal/node"
@@ -35,7 +36,7 @@ func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.L
 		return nil, nil, err
 	}
 	svc := &sessions.Service{
-		Self:  sessions.Peer{ID: ident.ID, Name: ident.Name},
+		Self:  sessions.Peer{ID: ident.ID, Name: ident.Name, Version: buildinfo.String()},
 		Store: store,
 		Now:   time.Now,
 		Log:   log,
@@ -135,8 +136,11 @@ func listSessions(dir string, args []string, out io.Writer) error {
 	fmt.Fprintln(tw, "SESSION\tUPDATED\tNODE\tAGENT\tPROJECT\tMSGS\tTITLE")
 	for _, s := range list.Sessions {
 		where := s.Node
-		if !s.Online {
+		switch {
+		case !s.Online:
 			where += " (offline)"
+		case s.Incompatible:
+			where += " (incompatible)"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n", s.Ref, s.UpdatedAt.Local().Format("2006-01-02 15:04"),
 			where, s.Agent, oneLine(s.Project, 24), s.Messages, oneLine(s.Title, 60))
@@ -145,21 +149,33 @@ func listSessions(dir string, args []string, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintln(out)
+	ours := 0
+	for _, n := range list.Nodes {
+		if n.Self {
+			ours = n.Protocol
+		}
+	}
 	for _, n := range list.Nodes {
 		noun := "sessions"
 		if n.Sessions == 1 {
 			noun = "session"
 		}
-		fmt.Fprintf(out, "%s: %d %s, %s\n", n.Name, n.Sessions, noun, nodeState(n))
+		fmt.Fprintf(out, "%s: %d %s, %s\n", n.Name, n.Sessions, noun, nodeState(n, ours))
 	}
 	return nil
 }
 
 // nodeState says in words where a node's sessions come from right now.
-func nodeState(n sessions.Node) string {
+func nodeState(n sessions.Node, ours int) string {
 	switch {
 	case n.Self:
 		return "this node"
+	case n.Online && n.Incompatible:
+		state := fmt.Sprintf("protocol incompatible (it speaks %d, this node %d)", n.Protocol, ours)
+		if n.SyncedAt == nil {
+			return state + ", never read"
+		}
+		return state + ", as of " + n.SyncedAt.Local().Format(time.DateTime)
 	case n.SyncedAt == nil && n.Online:
 		return "online, not read yet"
 	case n.SyncedAt == nil:
