@@ -178,8 +178,8 @@ func TestEveryAnswerCarriesTheSecurityHeaders(t *testing.T) {
 }
 
 func TestTheInterfaceOnlyReads(t *testing.T) {
-	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodOptions} {
-		for _, path := range []string{"/", "/api/v1/sessions", "/api/v1/refresh"} {
+	for _, method := range []string{http.MethodHead, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch, http.MethodOptions} {
+		for _, path := range []string{"/", "/api/v1/sessions", "/api/v1/refresh", "/app.js"} {
 			w := do(t, request{method: method, path: path, cookie: testToken})
 			if w.Code != http.StatusMethodNotAllowed || strings.Contains(w.Body.String(), "asked") {
 				t.Errorf("%s %s: %d %s", method, path, w.Code, w.Body)
@@ -200,15 +200,27 @@ func TestTheInterfaceOnlyReads(t *testing.T) {
 }
 
 func TestLoopbackAddr(t *testing.T) {
-	for _, addr := range []string{"127.0.0.1:4893", "127.0.0.1:0", "[::1]:4893", "localhost:4893", "127.0.0.2:1"} {
+	for _, addr := range []string{"127.0.0.1:4893", "127.0.0.1:0", "[::1]:4893", "localhost:4893"} {
 		if err := LoopbackAddr(addr); err != nil {
 			t.Errorf("LoopbackAddr(%q) = %v", addr, err)
 		}
 	}
+	// An address may be listened on exactly if a request that names it is
+	// answered: one that passed here and failed there would be a link that
+	// opens nothing.
+	for _, addr := range []string{"127.0.0.1:4893", "[::1]:4893", "localhost:4893", "127.0.0.2:4893", "127.1:4893",
+		"[::ffff:127.0.0.1]:4893", "[0:0:0:0:0:0:0:1]:4893", "LOCALHOST:4893"} {
+		listens := LoopbackAddr(addr) == nil
+		answers := do(t, request{path: "/api/v1/sessions", host: addr, cookie: testToken}).Code == http.StatusOK
+		if listens != answers {
+			t.Errorf("%s: may be listened on: %v, a request that names it is answered: %v", addr, listens, answers)
+		}
+	}
 	for _, addr := range []string{":4893", "0.0.0.0:4893", "[::]:4893", "192.168.1.20:4893", "100.64.0.2:4893",
-		"example.com:4893", "localhost.example.com:80", "4893", "127.0.0.1", ""} {
+		"example.com:4893", "localhost.example.com:80", "4893", "127.0.0.1", "",
+		"127.0.0.2:4893", "127.1:4893", "[::ffff:127.0.0.1]:4893", "[0:0:0:0:0:0:0:1]:4893", "LOCALHOST:4893", "[::1%lo]:4893"} {
 		if err := LoopbackAddr(addr); err == nil {
-			t.Errorf("LoopbackAddr(%q) accepted an address that is not this machine only", addr)
+			t.Errorf("LoopbackAddr(%q) accepted an address where a browser on this machine cannot open the page", addr)
 		}
 	}
 }

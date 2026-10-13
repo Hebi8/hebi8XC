@@ -97,7 +97,7 @@ The same sessions in a browser: the machines, the list with filters and search, 
 h8c web     # prints a link; open it in a browser on this machine
 ```
 
-`h8c up` serves the page at `127.0.0.1:4893`. It is for a browser on the same machine and cannot be opened from another device; `--web` moves it to another loopback address, `--web none` turns it off. If the port is taken, the node runs without the page and says so in its log.
+`h8c up` serves the page at `127.0.0.1:4893`. It is for a browser on the same machine and cannot be opened from another device; `--web` moves it to another port (the host is `127.0.0.1`, `localhost` or `[::1]`), `--web none` turns it off. If the port is taken, the node runs without the page and says so in its log.
 
 The page shows private data, so it does not open by itself. The link from `h8c web` carries a token, kept in the data directory (`web.token`, readable by you only). The first time, the page trades the token for a cookie and goes on to an address without it; after that the cookie is enough for a month. A browser without it only gets a note telling you to run `h8c web`. To lock every browser out, stop the node, delete `web.token` and start it again.
 

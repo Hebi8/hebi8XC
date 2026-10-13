@@ -137,7 +137,7 @@ func up(dir string, args []string) error {
 	fs.StringVar(&o.wakeDB, "wake-db", "", "session index of this machine (default: where Wake keeps it)")
 	fs.StringVar(&o.wakeCLI, "wake-cli", "", "wake-cli, to keep the index current (default: the one on PATH)")
 	fs.StringVar(&o.web, "web", "127.0.0.1:"+strconv.Itoa(node.DefaultPort+1),
-		"address of the web interface, on this machine only; none turns it off")
+		"address of the web interface: 127.0.0.1, localhost or [::1], and a port; none turns it off")
 	fs.Func("peer", "address of another node, HOST[:PORT]; may be repeated", func(v string) error {
 		if _, _, err := net.SplitHostPort(v); err != nil {
 			v = net.JoinHostPort(v, strconv.Itoa(node.DefaultPort))

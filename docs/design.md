@@ -189,7 +189,7 @@ On the control socket: `GET /v1/sessions` with `node`, `agent`, `project`, `sinc
 
 The node serves a page for a browser on the same machine (`internal/web`): the machines, the list of sessions, a session to read. It is read-only and it is the command line's twin: the page calls `GET /api/v1/sessions` and `GET /api/v1/sessions/messages`, which are the handlers of the control socket's routes of the same name, so the page and `h8c sessions`, `h8c show` get the same answers from the same code. Nothing else of the control socket is offered: no status, no peer list, nothing that writes. The files of the page are plain HTML, CSS and JavaScript, embedded in the binary; there is no build step and nothing is loaded from another server.
 
-`h8c up --web ADDR` sets the address, by default `127.0.0.1:4893`; `--web none` turns the page off. Only a loopback address is accepted. A port that is taken costs the page, not the node.
+`h8c up --web ADDR` sets the address, by default `127.0.0.1:4893`; `--web none` turns the page off. The host is `127.0.0.1`, `localhost` or `[::1]`, the names the Host check below knows; anything else is an error at start, also another loopback address such as `127.0.0.2`, where the page would listen and refuse every request. A port that is taken costs the page, not the node.
 
 A list of sessions is continued with a cursor: an answer that is not the last one carries `next`, and passing it as `after` gives the following page. The cursor is the position of the last session in the order of the list (update time, node, key), so a walk shows each session once. The same parameter exists on the control socket and as `h8c sessions --after`.
 
@@ -201,7 +201,7 @@ What the page shows is private. A port on 127.0.0.1 is reachable by every progra
 - **Every request for data must carry the token**, 32 random bytes kept in `web.token` in the data directory, mode 600, made on first use. `h8c web` prints `http://127.0.0.1:4893/?token=...`. The server answers that address by setting a cookie (`HttpOnly`, `SameSite=Strict`, valid a month) and redirecting to `/`, so the token leaves the address bar and the page's script never sees it. A program may send it as `Authorization: Bearer` instead. Without it the page is a note saying to run `h8c web`, and the API answers 401.
 - **No answer allows another origin to read it**: no CORS header is ever sent, and `Cross-Origin-Resource-Policy: same-origin` keeps other sites from embedding the answers. With `SameSite=Strict` the browser does not even send the cookie on a request another site started.
 - The token is never logged, and `Referrer-Policy: no-referrer` keeps addresses out of Referer headers. Answers are `Cache-Control: no-store`.
-- All routes are GET. Other methods are refused.
+- Only GET is answered. Every other method, HEAD too, gets 405.
 
 ### What it shows cannot be trusted
 

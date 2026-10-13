@@ -112,7 +112,7 @@ func TestWebCommandOpensTheInterface(t *testing.T) {
 }
 
 func TestWebOnlyListensOnThisMachine(t *testing.T) {
-	for _, addr := range []string{"0.0.0.0:4893", ":4893", "192.168.1.20:4893", "100.64.0.2:4893", "example.com:4893"} {
+	for _, addr := range []string{"0.0.0.0:4893", ":4893", "192.168.1.20:4893", "100.64.0.2:4893", "example.com:4893", "127.0.0.2:4893"} {
 		dir := t.TempDir()
 		err := h8cFails(t, dir, "up", "--listen", "127.0.0.1:0", "--discover", "none", "--web", addr)
 		if !strings.Contains(err.Error(), "--web") {

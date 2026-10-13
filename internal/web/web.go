@@ -31,6 +31,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -47,14 +48,23 @@ const (
 		"img-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 )
 
+// hosts are the names a browser on this machine reaches the page by. The
+// page listens on one of them, and a request has to name one of them.
+var hosts = []string{"127.0.0.1", "localhost", "[::1]"}
+
 // LoopbackAddr checks that addr, a host:port to listen on, is on this
 // machine only: the page is for a browser here, never for another device.
+// Other loopback addresses, such as 127.0.0.2, are not accepted either:
+// the page would listen there and then refuse every request by its Host.
 func LoopbackAddr(addr string) error {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return fmt.Errorf("--web %q: want HOST:PORT", addr)
 	}
-	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if !slices.Contains(hosts, host) {
 		return fmt.Errorf("--web %q: the web interface only listens on this machine itself; use 127.0.0.1, [::1] or localhost", addr)
 	}
 	return nil
@@ -114,7 +124,7 @@ func New(api http.Handler, token string, port int) http.Handler {
 	files, _ := fs.Sub(static, "static")
 	h := &handler{api: http.StripPrefix("/api", api), token: token, hosts: make(map[string]bool),
 		files: http.FileServerFS(files)}
-	for _, host := range []string{"127.0.0.1", "localhost", "[::1]"} {
+	for _, host := range hosts {
 		h.hosts[host+":"+strconv.Itoa(port)] = true
 	}
 	return h
@@ -135,8 +145,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	head.Set("Cross-Origin-Resource-Policy", "same-origin")
 	head.Set("Cross-Origin-Opener-Policy", "same-origin")
 	head.Set("Cache-Control", "no-store")
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "the web interface only reads", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodGet {
+		http.Error(w, "the web interface only answers GET", http.StatusMethodNotAllowed)
 		return
 	}
 
