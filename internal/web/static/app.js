@@ -43,6 +43,12 @@
     sideThread: id => `支线 ${id}`,
     showAll: n => `显示全部（${n} 个字符）`,
     failed: msg => `读取失败：${msg}`,
+    cannot: {
+      'not-found': () => '这个会话已经不存在了。',
+      'offline-not-read': name => `${name} 现在离线，本机也没有读过这个会话，所以这里没有它的副本。`,
+      'incompatible-not-read': name => `${name} 的协议和本机不兼容，本机也没有读过这个会话，所以这里没有它的副本。`,
+      'feed-restarted': name => `${name} 刚刚重建了它的会话列表，请稍后再试。`,
+    },
   } : {
     refresh: 'Refresh',
     machines: n => `Machines (${n})`,
@@ -78,6 +84,12 @@
     sideThread: id => `side thread ${id}`,
     showAll: n => `Show all (${n} characters)`,
     failed: msg => `Could not read: ${msg}`,
+    cannot: {
+      'not-found': () => 'This session no longer exists.',
+      'offline-not-read': name => `${name} is offline and this session has not been read on this machine before, so there is no copy of it here.`,
+      'incompatible-not-read': name => `${name} speaks another protocol than this machine and this session has not been read here before, so there is no copy of it here.`,
+      'feed-restarted': name => `${name} has just restarted its list of sessions. Try again in a moment.`,
+    },
   };
 
   const $ = id => document.getElementById(id);
@@ -95,6 +107,13 @@
     if (d.getFullYear() !== new Date().getFullYear()) form.year = 'numeric';
     return d.toLocaleString(lang, form);
   };
+  // short names a build in a few characters, as buildinfo.Short does: a
+  // build from a checkout by seven characters of its commit.
+  const short = build => {
+    const m = /^v\d+\.\d+\.\d+-(?:.*\.)?\d{14}-([0-9a-f]{12})(?:\+.*)?$/.exec(build);
+    if (m) return m[1].slice(0, 7);
+    return build.startsWith('devel-') && build.length > 13 ? build.slice(6, 13) : build;
+  };
   const PAGE = 50;
   const SPAN = { '24h': 864e5, '7d': 7 * 864e5, '30d': 30 * 864e5 };
   const FOLD = 4000; // characters of a message shown before "show all"
@@ -105,6 +124,7 @@
   let listSeq = 0;     // the newest list request; older answers are dropped
   let open = null;     // {node, key, next} of the session being read
   let readSeq = 0;
+  const listed = new Map(); // the sessions of the list on screen, by node and key
 
   async function api(path, params) {
     const url = new URL('/api/v1/' + path, location.origin);
@@ -118,7 +138,11 @@
       location.reload(); // the cookie is gone; the server says how to get a new one
       throw new Error('unauthorized');
     }
-    if (!res.ok) throw new Error((await res.text()).trim() || res.statusText);
+    if (!res.ok) {
+      const err = new Error((await res.text()).trim() || res.statusText);
+      err.code = res.headers.get('H8c-Error') || ''; // the reason as a word, if it has one
+      throw err;
+    }
     return res.json();
   }
 
@@ -155,13 +179,20 @@
       else if (!n.online) head.append(el('span', 'off', T.offline));
       else if (n.incompatible) head.append(el('span', 'bad', T.incompatible(n.protocol, self.protocol)));
       else head.append(el('span', '', T.online));
-      const facts = [
-        T.sessions(n.sessions),
-        n.self ? '' : n.synced_at ? T.synced(when(n.synced_at)) : T.neverSynced,
-        n.version || (n.protocol ? T.unknownBuild : ''),
-        n.protocol ? T.protocol(n.protocol) : '',
-      ];
-      li.append(head, el('div', 'dim', facts.filter(Boolean).join(' · ')));
+      // Each fact is one piece that does not break in the middle. Of the
+      // build there is the short name; the whole one is there on hover.
+      const facts = el('div', 'dim facts');
+      const fact = (text, whole) => {
+        if (!text) return;
+        const span = el('span', '', text);
+        if (whole && whole !== text) span.title = whole;
+        facts.append(span, ' ');
+      };
+      fact(T.sessions(n.sessions));
+      fact(n.self ? '' : n.synced_at ? T.synced(when(n.synced_at)) : T.neverSynced);
+      fact(n.version ? short(n.version) : n.protocol ? T.unknownBuild : '', n.version);
+      fact(n.protocol ? T.protocol(n.protocol) : '');
+      li.append(head, facts);
       return li;
     });
     $('machines').replaceChildren(...rows);
@@ -174,6 +205,7 @@
   }
 
   function row(s) {
+    listed.set(`${s.node_id}/${s.key}`, s);
     const li = el('li');
     li.dataset.node = s.node_id;
     li.dataset.key = s.key;
@@ -184,8 +216,8 @@
     if (!s.online) where += ` · ${T.offline}`;
     m.append(el('span', s.online ? 'where' : 'where off', where));
     m.append(el('span', 'grow', [s.agent, s.project].filter(Boolean).join(' · ')));
-    m.append(el('span', '', T.count(s.messages)));
-    m.append(el('span', '', when(s.updated_at)));
+    m.append(el('span', 'count', T.count(s.messages)));
+    m.append(el('span', 'when', when(s.updated_at)));
     li.append(m);
     if (open && open.node === s.node_id && open.key === s.key) li.classList.add('selected');
     return li;
@@ -221,6 +253,7 @@
     $('more').disabled = false;
 
     showMachines(page.nodes);
+    if (!more) listed.clear();
     const rows = page.sessions.map(row);
     if (more) {
       $('list').append(...rows);
@@ -310,12 +343,27 @@
     }
   }
 
+  // heading puts what a list or a reading says of a session above it.
+  function heading(s) {
+    $('title').textContent = s.title || s.key;
+    $('meta').textContent = [s.agent, s.node || s.node_id, s.project_path || s.project,
+      T.messages(s.messages), T.updated(when(s.updated_at))].filter(Boolean).join(' · ');
+  }
+
+  // In the narrow layout the reader is below the list, out of sight: a
+  // session that is opened has to be brought into view, and so has the
+  // reason why it cannot be shown.
+  const narrow = matchMedia('(max-width: 59.99rem)');
+  function toReader() {
+    if (narrow.matches) $('reader').scrollIntoView();
+  }
+
   // read shows a session from its start, or with more its next page.
   async function read(node, key, more) {
     if (more && !(open && open.next)) return; // the session is at its end
     const seq = ++readSeq;
     if (!more) {
-      open = { node, key, next: 0 };
+      open = { node, key, next: 0, listed: listed.get(`${node}/${key}`) };
       mark();
       $('reader-empty').hidden = true;
       $('reader-body').hidden = false;
@@ -324,6 +372,7 @@
       $('notes').replaceChildren();
       $('messages').replaceChildren();
       $('more-messages').hidden = true;
+      toReader();
     }
     $('more-messages').disabled = true;
     let r;
@@ -332,18 +381,23 @@
     } catch (err) {
       if (seq !== readSeq) return;
       $('more-messages').disabled = false;
-      if (!more) $('title').textContent = key;
-      $('notes').append(el('p', '', T.failed(err.message)));
+      if (!more) {
+        // The list knew the session by more than its key; so does this.
+        if (open.listed) heading(open.listed);
+        else $('title').textContent = key;
+      }
+      const at = nodes.find(n => n.id === node);
+      const name = (at && at.name) || (open.listed && open.listed.node) || node;
+      const known = Object.hasOwn(T.cannot, err.code) && T.cannot[err.code];
+      $('notes').append(el('p', '', known ? known(name) : T.failed(err.message)));
+      if (!more) toReader();
       return;
     }
     if (seq !== readSeq) return; // another session was opened meanwhile
     $('more-messages').disabled = false;
 
     if (!more) {
-      const s = r.session;
-      $('title').textContent = s.title || s.key;
-      $('meta').textContent = [s.agent, s.node || s.node_id, s.project_path || s.project,
-        T.messages(s.messages), T.updated(when(s.updated_at))].filter(Boolean).join(' · ');
+      heading(r.session);
       const notes = [];
       if (r.note) notes.push(r.note);
       else if (r.from === 'cache' && r.cached_at) notes.push(T.fromCopy(when(r.cached_at)));
@@ -351,7 +405,7 @@
       if (r.incomplete) notes.push(T.incomplete);
       $('notes').replaceChildren(...notes.map(n => el('p', '', n)));
       $('reader').scrollTop = 0;
-      if (matchMedia('(max-width: 59.99rem)').matches) $('reader').scrollIntoView();
+      toReader();
     }
     $('messages').append(...r.messages.map(message));
     open.next = r.next || 0;
@@ -397,7 +451,11 @@
   $('filters').addEventListener('submit', e => e.preventDefault());
   $('more').addEventListener('click', () => loadList(true));
   $('more-messages').addEventListener('click', () => open && read(open.node, open.key, true));
-  $('refresh').addEventListener('click', () => refresh(true));
+  $('refresh').addEventListener('click', async () => {
+    $('refresh').disabled = true;
+    await refresh(true);
+    $('refresh').disabled = false;
+  });
   $('list').addEventListener('click', e => {
     const li = e.target.closest('li');
     if (li) choose(li);

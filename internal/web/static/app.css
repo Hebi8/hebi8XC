@@ -51,11 +51,22 @@ button, input, select {
 }
 button { cursor: pointer; }
 button:hover { border-color: var(--accent); }
+/* A request is under way: the button is there and cannot be used. */
+button:disabled, button:disabled:hover {
+  cursor: default;
+  color: var(--dim);
+  background: var(--panel);
+  border-color: var(--line);
+  border-style: dashed;
+}
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* Narrow: the list, then the reader, in one page that scrolls. */
+/* Narrow: the list, then the reader, in one page that scrolls. A session
+   that is open has the height of the window at least, so that the page can
+   scroll its start, or the reason why there is none, to the top. */
 #browse { border-bottom: 1px solid var(--line); }
 #browse, #reader { padding: 0.75rem 1rem; }
+#reader-body:not([hidden]) { min-height: calc(100vh - 1.5rem); }
 
 /* Wide: side by side, each scrolling on its own. */
 @media (min-width: 60rem) {
@@ -70,6 +81,7 @@ button:hover { border-color: var(--accent); }
     border-right: 1px solid var(--line);
   }
   #reader { flex: 1; min-width: 0; overflow-y: auto; }
+  #reader-body:not([hidden]) { min-height: 0; }
 }
 
 summary { cursor: pointer; color: var(--dim); }
@@ -77,6 +89,9 @@ summary { cursor: pointer; color: var(--dim); }
 #machines li { padding: 0.2rem 0; overflow-wrap: anywhere; }
 #machines .name { font-weight: 600; margin-right: 0.5rem; }
 #machines .dim { color: var(--dim); }
+/* The facts of a machine wrap between two of them, never inside one. */
+#machines .facts span { white-space: nowrap; }
+#machines .facts span:not(:last-child)::after { content: " ·"; }
 .off { color: var(--dim); }
 .bad, #machines-note { color: var(--warn); }
 #machines-note { font-size: 0.87rem; margin: 0.4rem 0 0; }
@@ -106,6 +121,16 @@ summary { cursor: pointer; color: var(--dim); }
 #list .m span { flex: none; }
 #list .m .where { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
 #list .m .grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* A narrow list has no room for all of it in one line, and what gave way
+   was the project. There it is two lines: the machine and the time, then
+   the agent with the project, and the count. */
+@media (max-width: 32rem) {
+  #list .m { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 0.6rem; }
+  #list .m .where { grid-area: 1 / 1; max-width: none; }
+  #list .m .when { grid-area: 1 / 2; justify-self: end; }
+  #list .m .grow { grid-area: 2 / 1; }
+  #list .m .count { grid-area: 2 / 2; justify-self: end; }
+}
 /* Not "display" on the id alone: that would show the button while it is hidden. */
 #more:not([hidden]), #more-messages:not([hidden]) { display: block; margin: 0.75rem auto; }
 
