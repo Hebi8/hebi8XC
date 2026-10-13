@@ -20,7 +20,7 @@ Sources are pluggable (`discovery.Source`) and used together:
 
 An mDNS announcement holds the node id (as instance name and host name), the port, and `net=<tag>`. No key, no user name, no machine name. The **network tag** is the first 8 bytes of `SHA-256("hebi8xc network v1\0" + user id)` in hex. It keeps nodes from probing other users' nodes on a shared LAN. It is a filter, not a secret.
 
-mDNS runs on IPv4 on the one interface the OS routes multicast through, so a machine with many virtual bridges announces one address.
+mDNS runs on IPv4 on one LAN interface, so a machine with many virtual bridges announces one address. A LAN interface is up, does multicast, is neither loopback nor point-to-point, and has a private IPv4 address (10/8, 172.16/12, 192.168/16); an interface whose address is in 100.64.0.0/10, such as Tailscale's, is not one. The choice is the interface the OS routes multicast through if that is a LAN interface, which it is on an ordinary Linux or macOS machine. Otherwise, as on a Windows machine that prefers its Tailscale adapter, it is the LAN interface with the lowest index. With no LAN interface at all, mDNS is off and the node says so.
 
 The **user id** names the user in the roster and in the network tag. On a node that is logged in it is `github:<numeric account id>`; the id, unlike the login, never changes. On a node that is not, it is `--user`, defaulting to the OS user name. The two kinds have different tags, so they do not find each other over mDNS.
 
@@ -112,7 +112,7 @@ The running node listens on the Unix socket `control.sock` in the data directory
 
 One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `LockFileEx` on Windows) and holds it while it runs; a second `h8c up` on the same directory exits. A socket left behind by a crash is removed by the next node, after it has the lock.
 
-`control.Listen` and `control.Dial` are the only places that know the transport. Go supports Unix sockets on Windows 10 and later, so the same code is used there; this has been compiled but not run on Windows.
+`control.Listen` and `control.Dial` are the only places that know the transport. Go supports Unix sockets on Windows 10 and later, so the same code is used there, and it works on Windows 11.
 
 ## Data directory
 
@@ -139,4 +139,5 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 - The token of a login is not revoked when `h8c login` is done; it expires after 8 hours.
 - A first start that races another one may fail once with an incomplete identity and works when run again.
 - A refusal is recognized by the TLS alert the other node sends. If the alert is lost on the way, the failure counts as a broken connection and the "trusted but refused" hint is not logged. On Linux the alert arrived in every test.
-- On Windows the private key file relies on the profile directory's ACL; there are no mode bits. The Windows code is compiled but has not been run.
+- On Windows the private key file relies on the profile directory's ACL; there are no mode bits.
+- On Windows 11 `h8c id`, `login`, `up`, `peers` and `roster` have been run, with the control socket and the directory lock. mDNS has not been seen working there yet, and inbound connections need firewall rules that `h8c` does not create; see the README.

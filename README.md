@@ -76,6 +76,44 @@ Trust has to be mutual. If only one side has the other's key, `h8c up` on both s
 
 Without any login, hand-added keys are all there is, and everything works as before.
 
+### Windows
+
+`h8c id`, `login`, `up`, `peers` and `roster` have been run on Windows 11. One thing needs doing by hand: letting other machines connect in.
+
+**What you see.** On the other machines, `h8c peers` lists the Windows machine as online but only `VIA inbound` and with no address. They cannot call it; it stays online only because it keeps calling them.
+
+**Why.** The first time a program listens, Windows asks whether to allow it. If nobody answers "allow" as an administrator, Windows creates block rules for that program, typically one for TCP and one for UDP. A block rule wins over any allow rule, so adding a rule for the port is not enough: the block rules have to go first.
+
+**What to do**, in PowerShell run as Administrator:
+
+```powershell
+$exe = "C:\path\to\h8c.exe"   # the full path; wildcards do not work
+
+# The rules Windows created for it. Expect two with Action Block.
+Get-NetFirewallApplicationFilter -Program $exe | Get-NetFirewallRule |
+    Format-Table DisplayName, Direction, Action, Enabled
+
+# Delete them.
+Get-NetFirewallApplicationFilter -Program $exe | Get-NetFirewallRule | Remove-NetFirewallRule
+
+# Let nodes on private networks reach the peer link.
+New-NetFirewallRule -DisplayName "hebi8XC peer link" -Direction Inbound -Action Allow `
+    -Protocol TCP -LocalPort 4892 -Program $exe -Profile Private
+
+# Let mDNS announcements of other nodes in. See the note below.
+New-NetFirewallRule -DisplayName "hebi8XC mDNS" -Direction Inbound -Action Allow `
+    -Protocol UDP -LocalPort 5353 -Program $exe -Profile Private
+```
+
+Notes:
+
+- These commands were written from Microsoft's documentation ([firewall rules](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/rules), [Get-NetFirewallApplicationFilter](https://learn.microsoft.com/en-us/powershell/module/netsecurity/get-netfirewallapplicationfilter), [Remove-NetFirewallRule](https://learn.microsoft.com/en-us/powershell/module/netsecurity/remove-netfirewallrule), [New-NetFirewallRule](https://learn.microsoft.com/en-us/powershell/module/netsecurity/new-netfirewallrule), read on 2026-10-13). They have not been run on a real machine yet. The cause, block rules created for `h8c.exe`, was seen on one.
+- If the first command lists nothing, the path does not match the one Windows recorded; look for the rules in "Windows Defender Firewall with Advanced Security" under Inbound Rules.
+- The rules apply to networks Windows has marked Private. `Get-NetConnectionProfile` shows how each network is marked. Tailscale sets its own adapter to Private; a home network that Windows has marked Public is not covered until it is changed to Private.
+- The rules name the program by path. A copy of `h8c.exe` somewhere else is a new program to Windows, with a new prompt and new block rules.
+- Whether mDNS needs the UDP 5353 rule has not been tested. Inbound traffic is blocked unless a rule allows it, and the automatic block rules cover UDP as well, so the rule is expected to be needed. The mDNS rule that ships with Windows is assumed to cover only Windows' own service; that was not checked either. Without working mDNS the machine is still found through Tailscale, `--peer`, or by calling the others itself.
+- mDNS runs on one network adapter. On a machine with several, `h8c` takes the one Windows sends multicast through when that is a LAN adapter, otherwise the LAN adapter with the lowest index, and never a VPN adapter.
+
 Things to know:
 
 - The peer link listens on TCP port **4892** on all interfaces (`--listen` changes it). Tailscale discovery only probes 4892.
