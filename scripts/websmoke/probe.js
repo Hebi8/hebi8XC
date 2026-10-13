@@ -72,6 +72,23 @@
     document.getElementById(id).click();
     return t.log.length - before;
   };
+  // click is a reader's click on the row of a session in the list.
+  t.click = (node, key) => {
+    [...document.querySelectorAll('#list > li')].find(li => li.dataset.node === node && li.dataset.key === key).click();
+  };
+  // filter chooses a machine in the filters, as a reader does.
+  t.filter = node => {
+    const select = document.getElementById('node');
+    select.value = node;
+    select.dispatchEvent(new Event('input', { bubbles: true }));
+  };
+  // inView: all of the element is in the window, nothing of it scrolled away.
+  t.inView = e => {
+    const r = e.getBoundingClientRect();
+    return r.height > 0 && r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth;
+  };
+  // clipped: the element shows less than its text.
+  t.clipped = e => e.scrollWidth > e.clientWidth;
   t.open = (node, key) => { location.hash = `s=${encodeURIComponent(node)}/${encodeURIComponent(key)}`; };
   t.withCursor = from => t.log.slice(from).filter(url => new URL(url).searchParams.get('after') > '0');
 })();

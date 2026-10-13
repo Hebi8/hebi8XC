@@ -23,6 +23,7 @@ type chrome struct {
 	last    int
 	waiting map[int]chan reply
 	session string   // of the page
+	agent   string   // what the browser calls itself
 	trouble []string // dialogs that opened and exceptions that were not caught
 }
 
@@ -125,7 +126,7 @@ func (c *chrome) read(from *os.File) {
 		switch {
 		case m.Method == "Page.javascriptDialogOpening":
 			c.trouble = append(c.trouble, "a dialog opened: "+string(m.Params))
-			go c.call("Page.handleJavaScriptDialog", map[string]any{"accept": true}, nil)
+			go c.send(c.session, "Page.handleJavaScriptDialog", map[string]any{"accept": true}, nil)
 		case m.Method == "Runtime.exceptionThrown":
 			c.trouble = append(c.trouble, "an exception: "+string(m.Params))
 		case m.Method == "" && c.waiting[m.ID] != nil:
@@ -136,16 +137,21 @@ func (c *chrome) read(from *os.File) {
 	}
 }
 
-// call sends a command and waits for its answer.
+// call sends a command to the page, or before there is one to the browser,
+// and waits for its answer.
 func (c *chrome) call(method string, params, out any) error {
+	return c.send(c.session, method, params, out)
+}
+
+func (c *chrome) send(session, method string, params, out any) error {
 	c.mu.Lock()
 	c.last++
 	msg := map[string]any{"id": c.last, "method": method}
 	if params != nil {
 		msg["params"] = params
 	}
-	if c.session != "" {
-		msg["sessionId"] = c.session
+	if session != "" {
+		msg["sessionId"] = session
 	}
 	ch := make(chan reply, 1)
 	c.waiting[c.last] = ch
@@ -192,6 +198,44 @@ func (c *chrome) eval(expr string, out any) error {
 	return json.Unmarshal(r.Result.Value, out)
 }
 
+// view sets the width of the window and the language the browser asks
+// for, which is also the language the page finds in it.
+func (c *chrome) view(width int, language string) error {
+	if c.agent == "" {
+		var v struct{ UserAgent string }
+		if err := c.send("", "Browser.getVersion", nil, &v); err != nil {
+			return err
+		}
+		c.agent = v.UserAgent
+	}
+	if err := c.call("Emulation.setDeviceMetricsOverride", map[string]any{"width": width, "height": 844,
+		"deviceScaleFactor": 1, "mobile": false}, nil); err != nil {
+		return err
+	}
+	return c.call("Emulation.setUserAgentOverride", map[string]any{"userAgent": c.agent, "acceptLanguage": language}, nil)
+}
+
+// shot writes a picture of the page to a file: of what is in the window,
+// or with whole of everything the page has, scrolled to or not.
+func (c *chrome) shot(path string, whole bool) error {
+	params := map[string]any{"format": "png"}
+	if whole {
+		var m struct {
+			CSSContentSize struct{ Width, Height float64 }
+		}
+		if err := c.call("Page.getLayoutMetrics", nil, &m); err != nil {
+			return err
+		}
+		params["captureBeyondViewport"] = true
+		params["clip"] = map[string]any{"x": 0, "y": 0, "width": m.CSSContentSize.Width, "height": m.CSSContentSize.Height, "scale": 1}
+	}
+	var r struct{ Data []byte }
+	if err := c.call("Page.captureScreenshot", params, &r); err != nil {
+		return err
+	}
+	return os.WriteFile(path, r.Data, 0o600)
+}
+
 // await waits until a condition holds in the page.
 func (c *chrome) await(cond string) error {
 	var err error
@@ -212,12 +256,9 @@ func (c *chrome) troubles() []string {
 }
 
 func (c *chrome) close() {
-	c.mu.Lock()
-	c.session = "" // the last word is for the browser, not for the page
-	c.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		c.call("Browser.close", nil, nil)
+		c.send("", "Browser.close", nil, nil)
 		c.cmd.Wait()
 		close(done)
 	}()

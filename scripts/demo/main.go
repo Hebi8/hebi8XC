@@ -36,7 +36,7 @@ func main() {
 	fmt.Printf("\n  %s\n\n", n.URL)
 	fmt.Printf("  %-7s this machine, %d sessions; code blocks and long lines are in %q\n", d.Names[0], d.Sessions[0], d.Code)
 	fmt.Printf("  %-7s online, %d sessions; the long one is %q\n", d.Names[1], d.Sessions[1], d.Long)
-	fmt.Printf("  %-7s offline, %d sessions; a copy is kept of %q, the others cannot be read\n", d.Names[2], d.Sessions[2], d.Kept)
+	fmt.Printf("  %-7s offline, %d sessions; a copy is kept of %q, the others, such as %q, cannot be read\n", d.Names[2], d.Sessions[2], d.Kept, d.Unread)
 	fmt.Printf("\nCtrl-C stops the nodes and removes %s\n", n.Dir)
 
 	select {

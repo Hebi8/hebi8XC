@@ -17,6 +17,7 @@ type Data struct {
 	Long     string    // on laptop: a session of many pages
 	Code     string    // on desk: code blocks, long lines, a folded message
 	Kept     string    // on attic: read while it was online, so a copy is kept
+	Unread   string    // on attic: never read, so it cannot be shown; its project has a long name
 }
 
 type project struct{ name, path, branch string }
@@ -47,7 +48,7 @@ var (
 
 // fill puts the demo's sessions into the three indexes.
 func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
-	d := Data{Sessions: [3]int{58, 44, 11}}
+	d := Data{Sessions: [3]int{59, 44, 12}}
 	ms := now.UnixMilli()
 	const minute = 60_000
 	n := 0 // counts all sessions, so that no two look the same
@@ -72,9 +73,9 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 	// Desk and laptop were used until now, less the further back; attic was
 	// last used weeks ago.
 	recent := func(i int) int64 { return int64(i*i*7 + i*13 + 5) }
-	ordinary(desk, "desk", d.Sessions[0]-1, recent)
+	ordinary(desk, "desk", d.Sessions[0]-2, recent)
 	ordinary(laptop, "laptop", d.Sessions[1]-1, func(i int) int64 { return recent(i) + 9 })
-	ordinary(attic, "attic", d.Sessions[2]-1, func(i int) int64 { return int64(20+i*2) * 24 * 60 })
+	ordinary(attic, "attic", d.Sessions[2]-2, func(i int) int64 { return int64(20+i*2) * 24 * 60 })
 
 	d.Long = "claude:long-migration"
 	var long []waketest.Message
@@ -110,6 +111,15 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 		Project: "notes", Path: "/home/alice/notes", UpdatedAt: ms - 19*24*60*minute},
 		waketest.Message{Role: "user", Time: ms - 19*24*60*minute, Text: "What did we decide to order for the two beds by the fence?"},
 		waketest.Message{Role: "assistant", Time: ms - 19*24*60*minute, Text: "Carrots, chard and two rows of peas; the order goes out on Monday.\n胡萝卜、甜菜和两行豌豆，周一下单。"})
+
+	// Two projects with names that do not fit a row of the list.
+	desk.Put(waketest.Session{Key: "gemini:long-project-name", Agent: "gemini", Title: "Move the sign-in page to the new layout",
+		Project: "customer-portal-frontend-redesign-2026", Path: "/home/alice/work/customer-portal-frontend-redesign-2026",
+		Branch: "layout", Model: "flash", UpdatedAt: ms - 55*minute}, talk(false, 6, ms-55*minute)...)
+	d.Unread = "opencode:long-project-name"
+	attic.Put(waketest.Session{Key: d.Unread, Agent: "opencode", Title: "整理报销流程的自动化脚本",
+		Project: "家庭财务与报销流程自动化工具集", Path: "/home/alice/src/家庭财务与报销流程自动化工具集",
+		UpdatedAt: ms - 18*24*60*minute}, talk(true, 4, ms-18*24*60*minute)...)
 	return d
 }
 

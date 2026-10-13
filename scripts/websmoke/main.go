@@ -7,8 +7,13 @@
 // It starts the nodes of scripts/demo on free ports, and stops them. It
 // checks that the "load more" buttons are gone at the end of a list, that
 // nothing is shown twice, that an answer which comes late does not bring
-// back the place in a list that is no longer asked for, and that text
-// which tries to be markup stays text.
+// back the place in a list that is no longer asked for, that text which
+// tries to be markup stays text, and that a narrow window shows a session
+// that cannot be read, and why, in the reader's language.
+//
+// With -shots DIR it also writes pictures of the page there, narrow and
+// wide, in English and in Chinese, to look at after a change of the
+// layout. They are of the demo; they do not belong in the repository.
 package main
 
 import (
@@ -19,11 +24,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/Hebi8/hebi8XC/internal/buildinfo"
 	"github.com/Hebi8/hebi8XC/internal/sessions/wake/waketest"
 	"github.com/Hebi8/hebi8XC/scripts/internal/demo"
 )
@@ -104,6 +111,7 @@ func main() {
 
 func run() int {
 	bin := flag.String("chrome", "", "the Chrome to run (default: the one on PATH)")
+	shots := flag.String("shots", "", "a directory to write pictures of the page to")
 	flag.Parse()
 	path, err := findChrome(*bin)
 	if err != nil {
@@ -130,7 +138,7 @@ func run() int {
 		return 2
 	}
 	k := &checker{c: c}
-	desk, laptop := n.Data.IDs[0], n.Data.IDs[1]
+	desk, laptop, attic := n.Data.IDs[0], n.Data.IDs[1], n.Data.IDs[2]
 	home := n.URL[:strings.Index(n.URL, "?")]
 	open := func(url string) {
 		if err := c.call("Page.navigate", map[string]any{"url": url}, nil); err != nil {
@@ -207,12 +215,14 @@ func run() int {
 	k.check("there is a place in the list to lose", js[bool](k, `__t.shown('more')`))
 	from := js[int](k, `(__t.hold = true, __t.log.length)`)
 	k.check("the refresh is asked for", js[int](k, `__t.press('refresh')`) == 1)
+	k.check("while it is, \"refresh\" cannot be used", js[bool](k, `document.getElementById('refresh').disabled`))
 	k.c.eval(`(() => { const a = document.getElementById('agent'); a.value = `+q(agent)+`; a.dispatchEvent(new Event('input', {bubbles: true})); })()`, nil)
 	k.check("once the filters change \"load more\" is not shown", !js[bool](k, `__t.shown('more')`))
 	k.await(`__t.held.length === 2`)
 	k.c.eval(`__t.release(0)`, nil)
 	k.check("after the late answer \"load more\" is not shown", !js[bool](k, `__t.shown('more')`))
 	k.check("after the late answer a click on it asks for nothing", js[int](k, `__t.press('more')`) == 0)
+	k.check("with its answer \"refresh\" can be used again", !js[bool](k, `document.getElementById('refresh').disabled`))
 	k.c.eval(`__t.release(1)`, nil)
 	rows = js[[]string](k, `__t.rows()`)
 	k.check("the list is the first page for the new filters", reflect.DeepEqual(rows, filtered.IDs[:filtered.First]), len(rows), "rows,", filtered.First, "expected")
@@ -238,6 +248,57 @@ func run() int {
 	k.check("the messages are those of the session that was opened", len(short) > 0 && reflect.DeepEqual(seqs, short), len(seqs), "on the page,", len(short), "in the session")
 	k.check("two requests were made", js[int](k, `__t.log.length`)-from == 2)
 
+	fmt.Println("# a narrow window, in Chinese")
+	// unreadable opens, from the list of attic, the session of it that was
+	// never read, with a reader's click on its row.
+	unreadable := func() {
+		k.c.eval(`__t.hold = false; __t.held = []; __t.filter(`+q(attic)+`)`, nil)
+		k.await(`__t.rows().length === ` + fmt.Sprint(n.Data.Sessions[2]) + ` && !document.getElementById('more').disabled`)
+		k.c.eval(`__t.click(`+q(attic)+`, `+q(n.Data.Unread)+`)`, nil)
+		k.await(`document.querySelector('#notes p')`)
+	}
+	if err := c.view(390, "zh-CN"); err != nil {
+		k.check("a narrow window", false, err)
+	}
+	open(home)
+	k.check("the page speaks Chinese", js[string](k, `document.documentElement.lang`) == "zh-CN")
+	k.c.eval(`__t.filter(`+q(attic)+`)`, nil)
+	k.await(`__t.rows().length === ` + fmt.Sprint(n.Data.Sessions[2]))
+	k.check("in a row the machine and the time are whole", js[int](k, `[...document.querySelectorAll('#list .where, #list .when, #list .count')].filter(__t.clipped).length`) == 0)
+	k.check("in a row only a long project name is cut short", reflect.DeepEqual(
+		js[[]string](k, `[...document.querySelectorAll('#list > li')].filter(li => __t.clipped(li.querySelector('.grow'))).map(li => li.dataset.key)`), []string{n.Data.Unread}),
+		js[[]string](k, `[...document.querySelectorAll('#list .grow')].filter(__t.clipped).map(e => e.textContent)`))
+	k.check("the rows are of one height", js[int](k, `new Set([...document.querySelectorAll('#list > li')].map(li => li.offsetHeight)).size`) == 1)
+	listed := js[string](k, `[...document.querySelectorAll('#list > li')].find(li => li.dataset.key === `+q(n.Data.Unread)+`).querySelector('.t').textContent`)
+	k.check("the reader is out of sight before the click", !js[bool](k, `__t.inView(document.getElementById('title'))`))
+	unreadable()
+	why := js[string](k, `document.querySelector('#notes p').textContent`)
+	k.check("the reason why it cannot be read is in the window", js[bool](k, `__t.inView(document.querySelector('#notes p'))`),
+		js[string](k, `JSON.stringify(document.querySelector('#notes p').getBoundingClientRect())`))
+	k.check("its title is the one of the list, in the window too", listed != "" && listed != n.Data.Unread &&
+		js[string](k, `document.getElementById('title').textContent`) == listed && js[bool](k, `__t.inView(document.getElementById('title'))`),
+		js[string](k, `document.getElementById('title').textContent`))
+	k.check("what the list said of it is under the title", strings.Contains(js[string](k, `document.getElementById('meta').textContent`), "opencode"))
+	k.check("the reason is in Chinese and names the machine", strings.Contains(why, n.Data.Names[2]+" 现在离线") && !strings.Contains(why, "offline"), why)
+	type build struct{ Version, Shown, Whole string }
+	builds := js[[]build](k, `__t.sessions('').then(() => fetch('/api/v1/sessions?limit=1')).then(r => r.json()).then(page =>
+		page.nodes.map((n, i) => { const s = document.querySelectorAll('#machines li')[i].querySelectorAll('.facts span'); const b = s[s.length - 2];
+			return { Version: n.version || '', Shown: b.textContent, Whole: b.title }; }))`)
+	for _, b := range builds {
+		short := buildinfo.Short(b.Version)
+		k.check("a machine's build is named the short way, the whole on hover", len(builds) == 3 && b.Version != "" && b.Shown == short &&
+			(b.Whole == b.Version || short == b.Version && b.Whole == ""), fmt.Sprintf("%+v", b))
+	}
+	k.check("no fact about a machine breaks in the middle", js[int](k,
+		`[...document.querySelectorAll('#machines .facts span')].filter(s => new Set([...s.getClientRects()].map(r => Math.round(r.top))).size !== 1).length`) == 0)
+
+	if *shots != "" {
+		fmt.Println("# pictures")
+		if err := pictures(ctx, k, *shots); err != nil {
+			k.check("the pictures", false, err)
+		}
+	}
+
 	fmt.Println("# all along")
 	k.check("no dialog opened and no exception went uncaught", len(c.troubles()) == 0, c.troubles())
 
@@ -247,4 +308,56 @@ func run() int {
 	}
 	fmt.Println("\nall checks passed")
 	return 0
+}
+
+// pictures writes pictures of the page to dir: of a demo of its own, which
+// has nothing in it that tries to be markup, in a narrow and in a wide
+// window, in English and in Chinese.
+func pictures(ctx context.Context, k *checker, dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	n, err := demo.Start(ctx, demo.Options{})
+	if err != nil {
+		return err
+	}
+	defer n.Close()
+	c := k.c
+	attic := n.Data.IDs[2]
+	home := n.URL[:strings.Index(n.URL, "?")]
+	shot := func(name string, whole bool) {
+		if err := c.shot(filepath.Join(dir, name+".png"), whole); err != nil {
+			k.check("a picture", false, err)
+		}
+	}
+	for _, width := range []int{390, 1440} {
+		for _, language := range []string{"en-US", "zh-CN"} {
+			name := fmt.Sprintf("%d-%s-", width, language[:2])
+			if err := c.view(width, language); err != nil {
+				return err
+			}
+			// Under another name of this machine the browser has no cookie
+			// for the page: that is the notice.
+			c.call("Page.navigate", map[string]any{"url": strings.Replace(home, "127.0.0.1", "localhost", 1)}, nil)
+			k.await(`document.body.className === 'notice'`)
+			shot(name+"1-notice", false)
+
+			c.call("Page.navigate", map[string]any{"url": n.URL}, nil)
+			k.await(`window.__t && __t.rows().length > 0 && !document.getElementById('more').disabled`)
+			c.eval(`__t.hold = true; __t.press('refresh')`, nil)
+			shot(name+"2-refresh-pending", false)
+			c.eval(`document.getElementById('more').scrollIntoView({block: 'center'})`, nil)
+			shot(name+"3-more-disabled", false)
+			c.eval(`__t.release(0).then(() => { scrollTo(0, 0); document.getElementById('browse').scrollTop = 0; })`, nil)
+
+			c.eval(`__t.hold = false; __t.held = []; __t.filter(`+q(attic)+`)`, nil)
+			k.await(`__t.rows().length === ` + fmt.Sprint(n.Data.Sessions[2]))
+			shot(name+"4-machines-and-rows", true)
+			c.eval(`__t.click(`+q(attic)+`, `+q(n.Data.Unread)+`)`, nil)
+			k.await(`document.querySelector('#notes p')`)
+			shot(name+"5-cannot-be-read", false)
+		}
+	}
+	fmt.Println("written to " + dir)
+	return nil
 }
