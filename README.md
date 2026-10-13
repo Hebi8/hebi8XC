@@ -2,7 +2,7 @@
 
 A LAN-first network of one user's own machines, with no central server. Every machine runs a node; nodes find each other, prove they belong to the same user and connect directly. Later each node will share what it knows about the AI coding agent sessions on its machine.
 
-So far it does discovery, the handshake and the node list. "The same user" means the same GitHub account. The command is `h8c`.
+Nodes find each other, check that they belong to the same GitHub account, and show the agent sessions of every machine from any of them. The command is `h8c`.
 
 ## Install
 
@@ -58,6 +58,33 @@ h8c roster           # the trusted keys and where each comes from
 h8c roster refresh   # fetch the GitHub list now
 h8c id               # this node's id, name, key and account
 ```
+
+## Agent sessions
+
+```sh
+h8c sessions                      # the sessions of all your machines, newest first
+h8c sessions parser --node desk --since 7d
+h8c show desk/claude:0f3a9c       # read one; the name is the first column of the list
+```
+
+```
+SESSION              UPDATED           NODE              AGENT   PROJECT  MSGS  TITLE
+desk/claude:0f3a9c   2026-10-13 18:02  desk              claude  parser   42    Fix the parser
+laptop/codex:71be    2026-10-12 09:15  laptop (offline)  codex   notes    7     Plan the trip
+
+desk: 2 sessions, this node
+laptop: 1 session, offline, as of 2026-10-12 23:40:11
+```
+
+Sessions of a machine that is off are still listed, as they were when it was last seen. A session you have read before can still be read then; one you have not cannot. `--json` on both commands prints the same data for programs. Other filters: `--agent`, `--project`, `--limit`.
+
+`h8c` does not read the agents' files itself. It uses the index of [Wake](https://github.com/iAmCorey/Wake), so a machine shares its sessions when Wake's index is there:
+
+- Get Wake from its [releases](https://github.com/iAmCorey/Wake/releases) (tested with v0.9.2; the Linux archive contains `wake-cli`) and put `wake-cli` on your PATH, or pass `h8c up --wake-cli /path/to/wake-cli`.
+- That is all. `h8c up` builds the index on its first start if there is none, which took about 40 seconds for 4500 sessions, and refreshes it every two minutes. While the Wake app is open, the app keeps the index current and `h8c` only reads it.
+- The index is the one Wake uses itself, at Wake's default place. `--wake-db` points `h8c` at another.
+
+A machine without Wake still lists and reads the sessions of the others. The index is read-only to `h8c`, and it never leaves the machine as a whole: other nodes get the list of sessions, and the text of a session when someone reads it.
 
 ### Removing a machine
 

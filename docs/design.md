@@ -2,7 +2,7 @@
 
 hebi8XC connects the machines of one user. Each machine runs a node. There is no hub and no server: nodes connect pairwise.
 
-This document covers discovery, the handshake, the roster and the node list. Session indexing comes later as routes on the same connection.
+This document covers discovery, the handshake, the roster, the node list and the first service on top of them: the sessions of the AI coding agents on each machine.
 
 ## Discovery and authentication are separate
 
@@ -91,7 +91,7 @@ Every node runs an HTTPS server with mutual TLS 1.3 (`internal/link`). Calls bet
 - The client does not follow redirects, so only the node that passed the handshake can answer a call.
 - Request and reply bodies are capped at 64 KiB. A request has 10 s to arrive.
 
-The only route so far is `POST /v1/hello`: both sides send `{id, name, port}`. A new service is a new route on the same mux; the handler gets the caller's key from `link.PeerKey`.
+`POST /v1/hello` is how nodes greet: both sides send `{id, name, port}`. A service is more routes on the same mux, as the [session module](#sessions) shows; a handler gets the caller's key from `link.PeerKey`.
 
 Default port: **4892** TCP (`h8xc` on a phone keypad).
 
@@ -105,6 +105,66 @@ One entry per node id, stored in `peers.json`: id, name, public key, known addre
 - A peer with no contact for 30 s is marked offline and kept. The next contact brings it back.
 - The same node found through several sources or addresses is one entry. At most 8 addresses are kept per peer.
 - Online state is not stored; after a restart every peer is offline until contacted.
+
+## Sessions
+
+Every node makes the agent sessions of its machine visible to the others, and any node answers for the whole network: which sessions there are, and what is in one. What a node has read from another it keeps, so a machine that is switched off still shows its sessions, and those that were read before can still be read.
+
+```
+agent session files -> Wake index -> feed of this node --link--> copy on each peer
+                        (wake.db)     (sessions.db)               (its sessions.db)
+                                                                        |
+h8c sessions / h8c show --control socket--> node: own feed + copies + cached messages
+```
+
+### The index of a machine
+
+`h8c` does not parse session files. [Wake](https://github.com/iAmCorey/Wake) does that for some twenty agents and keeps the result in a SQLite database. `internal/sessions/wake` reads it:
+
+- It opens the database read-only, with a busy timeout, the way Wake's own side tools do. A reader does not block Wake's writes. It never changes the journal mode and never writes.
+- The database is Wake's internal format. Everything that depends on it is in that one package, written against Wake v0.9.2. Before reading, it checks that the tables and columns it uses exist. If not, it reports that it cannot make out the structure of the index, and this machine's sessions are not shared; the rest of the node is unaffected, and other machines' sessions are still listed. It looks again every round, so a later repair is picked up.
+- Sessions that Wake mirrored from other hosts (`host` not empty) are left out. They belong to another machine.
+- What it reads of a session: key (`<agent>:<id>`), agent, title, project name and path, branch, model, creation and update time, message count, parent session, whether an agent spawned it, whether it is archived. Of a message: Wake's text for it, role, time, number, side thread. This is the text Wake indexes, not a rendering of the session file.
+
+Where `wake-cli` is found, on PATH or through `--wake-cli`, the node runs `wake-cli refresh` every 2 minutes, and `wake-cli index` first if there is no index. While the Wake app runs, both commands leave the index alone and succeed, because the app keeps it current. Without `wake-cli` an existing index is read as it is. The index is taken from Wake's default location unless `--wake-db` names another.
+
+The rest of the module only sees an interface, `sessions.Source`: list the sessions of this machine, read the messages of one. Wake is its first implementation.
+
+### The feed
+
+Wake's index has no counter that says what changed since when; a session can change in ways its update time does not show, and old sessions can appear late. So the node keeps its own record: the **feed**, in `sessions.db` in the data directory. Every minute it compares the index with the feed. A session that is new or different gets the next **revision** number; one that is gone keeps its key and gets a revision too, as a mark that it was deleted. An index that cannot be read changes nothing: it is not an index without sessions.
+
+A peer reads the feed with a cursor: "everything above revision N". It therefore gets every change once, deletions included, and nothing has to be compared or guessed. The feed has an **epoch**, a random id made with the store. A node whose store was lost starts a new feed; its peers see the new epoch, drop what they had from it and read from the start. That is the only time a feed is read again in full.
+
+### Between nodes
+
+Two routes on the peer link, so only roster members reach them:
+
+| Route | Answer |
+| --- | --- |
+| `GET /v1/sessions?after=REV&limit=N` | `{epoch, changes: [{rev, deleted, key, agent, title, ...}], more}`, in order of revision |
+| `GET /v1/sessions/messages?key=KEY&after=ID&limit=N` | `{rev, messages: [{id, seq, role, time, text, sidechain, truncated}], more}`, in order |
+
+- An answer holds at most 500 items and about 1 MiB of JSON, whichever comes first, but always one item. Message text is cut at 200 000 characters and marked. The reader accepts answers up to 8 MiB.
+- Only sessions in the feed can be read. A key is a value in a query, never part of a path or of SQL.
+- The reader checks that the answer came from the key the peer is known by. An address can pass from one node to another.
+
+Every minute, and as soon as a peer becomes reachable, a node reads what is new in the feed of each peer that is online at a known address, and applies it to its copy: changed sessions are replaced, deleted ones removed together with their cached messages. A feed that does not move forward, or lists more than 200 000 sessions, is refused.
+
+### Reading and the cache
+
+A session of this machine is read straight from the index. A session of another node is read from a copy in `sessions.db`:
+
+- The first time, the node fetches the whole session from its machine, page by page, and stores it. Later readings use the copy.
+- The copy records the revision it was made from. When the feed shows a newer revision, the next reading fetches the session again. The new copy replaces the old one only when it is complete; if the fetch fails, the old copy is shown and marked as out of date.
+- When the other node is offline, the copy is shown with the time it was made. A session that was never read has no copy, and the reader is told so.
+- A copy stops at 256 MiB and is then marked as not reaching the end.
+
+Nothing is ever removed from the cache except what its machine deleted.
+
+### Asking the node
+
+On the control socket: `GET /v1/sessions` with `node`, `agent`, `project`, `since`, `text` (repeatable) and `limit` lists the sessions of all nodes, newest first, each with its node and whether that node is online, plus one entry per node with the time its sessions were last read. `GET /v1/sessions/messages` with `node`, `key`, `after` and `limit` reads a page of a session. `h8c sessions` and `h8c show` are these two calls; with `--json` they print the answer as it is, for programs. A session is named `NODE/KEY`, with the node's name where that is unambiguous and its id otherwise.
 
 ## Control interface
 
@@ -125,6 +185,7 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 | `account.json` | GitHub account the node is logged in to: id and login |
 | `github_keys.json` | Cache of the GitHub roster |
 | `peers.json` | Node list |
+| `sessions.db` | Session feed of this node, copies of the others' feeds, cached messages (SQLite, mode 600) |
 | `control.sock` | Control socket, while the node runs |
 | `lock` | Held by the running node |
 
@@ -139,5 +200,11 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 - The token of a login is not revoked when `h8c login` is done; it expires after 8 hours.
 - A first start that races another one may fail once with an incomplete identity and works when run again.
 - A refusal is recognized by the TLS alert the other node sends. If the alert is lost on the way, the failure counts as a broken connection and the "trusted but refused" hint is not logged. On Linux the alert arrived in every test.
+- Sessions: the cache only grows. Sessions and messages copied from a node stay until that node deletes them, also when the node leaves the roster.
+- Sessions: a node that cannot be called, such as one behind a firewall that only lets it call out, cannot share its sessions. It can still read the others'.
+- Sessions: news travels with a delay. A change reaches the index within 2 minutes when `wake-cli` does the refreshing, the feed within another minute, and a peer within one more.
+- Sessions: the first reading of a long session copies all of it before anything is shown. Message text beyond 200 000 characters is not transferred.
+- Sessions: the marks for deleted sessions stay in the feed for good.
+- Sessions: a newer Wake may change its database. Then this machine's sessions stop being shared until the reader is updated.
 - On Windows the private key file relies on the profile directory's ACL; there are no mode bits.
 - On Windows 11 `h8c id`, `login`, `up`, `peers` and `roster` have been run, with the control socket and the directory lock. mDNS has not been seen working there yet, and inbound connections need firewall rules that `h8c` does not create; see the README.
