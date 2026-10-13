@@ -1,0 +1,140 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --panel: #f6f6f4;
+  --text: #1c1c1a;
+  --dim: #6a6a66;
+  --line: #deded9;
+  --accent: #0b6e69;
+  --accent-bg: #e3f1f0;
+  --warn: #8a5300;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171716;
+    --panel: #1f1f1d;
+    --text: #e6e6e1;
+    --dim: #9a9a94;
+    --line: #33332f;
+    --accent: #5cc4bd;
+    --accent-bg: #1d3432;
+    --warn: #e0a84a;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+#self { color: var(--dim); flex: 1; }
+
+button, input, select {
+  font: inherit;
+  color: inherit;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+}
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Narrow: the list, then the reader, in one page that scrolls. */
+#browse { border-bottom: 1px solid var(--line); }
+#browse, #reader { padding: 0.75rem 1rem; }
+
+/* Wide: side by side, each scrolling on its own. */
+@media (min-width: 60rem) {
+  html, body { height: 100%; }
+  body { display: flex; flex-direction: column; }
+  main { flex: 1; min-height: 0; display: flex; }
+  #browse {
+    width: 28rem;
+    flex: none;
+    overflow-y: auto;
+    border-bottom: 0;
+    border-right: 1px solid var(--line);
+  }
+  #reader { flex: 1; min-width: 0; overflow-y: auto; }
+}
+
+summary { cursor: pointer; color: var(--dim); }
+#machines { list-style: none; margin: 0.4rem 0 0.2rem; padding: 0; font-size: 0.87rem; }
+#machines li { padding: 0.2rem 0; overflow-wrap: anywhere; }
+#machines .name { font-weight: 600; margin-right: 0.5rem; }
+#machines .dim { color: var(--dim); }
+.off { color: var(--dim); }
+.bad, #machines-note { color: var(--warn); }
+#machines-note { font-size: 0.87rem; margin: 0.4rem 0 0; }
+
+#filters { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.75rem 0 0.5rem; }
+#filters > * { flex: 1 1 8rem; min-width: 0; }
+#q { flex-basis: 100%; }
+
+#list-note, #reader-empty { color: var(--dim); }
+#list { list-style: none; margin: 0; padding: 0; }
+#list li {
+  padding: 0.45rem 0.6rem;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+#list li:hover { background: var(--panel); }
+#list li.selected { border-left-color: var(--accent); background: var(--accent-bg); }
+#list .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .m {
+  display: flex;
+  gap: 0.6rem;
+  color: var(--dim);
+  font-size: 0.83rem;
+  white-space: nowrap;
+}
+#list .m span { flex: none; }
+#list .m .where { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+#list .m .grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#more, #more-messages { display: block; margin: 0.75rem auto; }
+
+#title { font-size: 1.15rem; margin: 0 0 0.2rem; overflow-wrap: anywhere; }
+#meta { color: var(--dim); font-size: 0.87rem; margin: 0 0 0.6rem; overflow-wrap: anywhere; }
+#notes p {
+  margin: 0 0 0.4rem;
+  padding: 0.35rem 0.6rem;
+  background: var(--panel);
+  border-left: 3px solid var(--warn);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.msg { border-top: 1px solid var(--line); padding: 0.6rem 0; }
+.msg .h { color: var(--dim); font-size: 0.83rem; display: flex; gap: 0.6rem; margin-bottom: 0.2rem; }
+.msg .h .role { color: var(--accent); font-weight: 600; }
+.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 0.87rem/1.45 var(--mono);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.5rem 0.6rem;
+  margin: 0.4rem 0;
+}
+.msg a { color: var(--accent); }
+.msg .cut { color: var(--dim); font-size: 0.87rem; }
+.msg button { margin-top: 0.4rem; font-size: 0.87rem; }
+
+body.notice main { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; display: block; }
+code { font-family: var(--mono); background: var(--panel); padding: 0.05rem 0.3rem; border-radius: 3px; }

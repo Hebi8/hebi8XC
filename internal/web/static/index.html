@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>hebi8XC</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <h1>hebi8XC</h1>
+  <span id="self"></span>
+  <button id="refresh" type="button"></button>
+</header>
+<main>
+  <section id="browse">
+    <details id="machines-box" open>
+      <summary id="machines-title"></summary>
+      <p id="machines-note" hidden></p>
+      <ul id="machines"></ul>
+    </details>
+    <form id="filters">
+      <input id="q" type="search" autocomplete="off">
+      <select id="node"></select>
+      <input id="agent" type="text" list="agents" autocomplete="off">
+      <datalist id="agents"></datalist>
+      <input id="project" type="text" autocomplete="off">
+      <select id="since"></select>
+    </form>
+    <p id="list-note" hidden></p>
+    <ol id="list"></ol>
+    <button id="more" type="button" hidden></button>
+  </section>
+  <section id="reader">
+    <p id="reader-empty"></p>
+    <div id="reader-body" hidden>
+      <h2 id="title"></h2>
+      <p id="meta"></p>
+      <div id="notes"></div>
+      <div id="messages"></div>
+      <button id="more-messages" type="button" hidden></button>
+    </div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
