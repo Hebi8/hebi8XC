@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -545,8 +547,33 @@ func TestOfflineNodeIsListedAndReadFromTheCopy(t *testing.T) {
 	_, _, err = laptop.readAll("desk", "claude:unread", 2)
 	var notCached *NotCachedError
 	if !errors.As(err, &notCached) || !strings.Contains(err.Error(), "desk is offline") ||
-		!strings.Contains(err.Error(), "has not been read on this machine") {
-		t.Errorf("reading what was never read: err = %v", err)
+		!strings.Contains(err.Error(), "has not been read on this machine") || Code(err) != CodeOffline {
+		t.Errorf("reading what was never read: err = %v, code %q", err, Code(err))
+	}
+
+	// Asked over the control routes, the failure is the same sentence as
+	// ever, and a header gives the reason as a word.
+	mux := http.NewServeMux()
+	laptop.ControlRoutes(mux)
+	ask := func(key string) (int, string, string) {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, httptest.NewRequest("GET", "/v1/sessions/messages?node=desk&key="+key, nil))
+		return w.Code, w.Header().Get(ErrorHeader), strings.TrimSpace(w.Body.String())
+	}
+	if status, code, said := ask("claude:unread"); status != http.StatusServiceUnavailable || code != "offline-not-read" || said != err.Error() {
+		t.Errorf("what was never read: %d, code %q, %q", status, code, said)
+	}
+	if status, code, said := ask("claude:gone"); status != http.StatusNotFound || code != "not-found" || !strings.Contains(said, "no such session") {
+		t.Errorf("what does not exist: %d, code %q, %q", status, code, said)
+	}
+	if status, code, _ := ask("claude:read"); status != http.StatusOK || code != "" {
+		t.Errorf("what can be read: %d, code %q", status, code)
+	}
+	// A failure without a word of its own has no header.
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/v1/sessions/messages?node=nobody&key=claude:read", nil))
+	if w.Code != http.StatusBadRequest || w.Header().Get(ErrorHeader) != "" {
+		t.Errorf("an unknown node: %d, code %q", w.Code, w.Header().Get(ErrorHeader))
 	}
 }
 
@@ -1034,7 +1061,7 @@ func TestCopyIsDroppedWhenTheFeedStartsOver(t *testing.T) {
 		}
 	}
 	_, _, err := laptop.readAll("desk", "claude:a", 10)
-	if !errors.Is(err, ErrFeedChanged) || !strings.Contains(err.Error(), "desk restarted its session feed") {
+	if !errors.Is(err, ErrFeedChanged) || !strings.Contains(err.Error(), "desk restarted its session feed") || Code(err) != CodeFeedRestarted {
 		t.Fatalf("reading across the restart: err = %v, want ErrFeedChanged", err)
 	}
 	if rows := laptop.cachedRows(); rows != 0 {
@@ -1233,7 +1260,7 @@ func TestPeerThatMovedToAnotherProtocol(t *testing.T) {
 	}
 	_, _, err = laptop.readAll("desk", "claude:unread", 10)
 	var notCached *NotCachedError
-	if !errors.As(err, &notCached) || !strings.Contains(err.Error(), "desk speaks protocol 2 while this node speaks 1") {
+	if !errors.As(err, &notCached) || !strings.Contains(err.Error(), "desk speaks protocol 2 while this node speaks 1") || Code(err) != CodeIncompatible {
 		t.Errorf("reading what was never read: %v", err)
 	}
 }

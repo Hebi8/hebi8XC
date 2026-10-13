@@ -43,6 +43,9 @@ func (s *Service) ControlRoutes(mux *http.ServeMux) {
 		q := r.URL.Query()
 		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
 		reading, err := s.Read(r.Context(), q.Get("node"), q.Get("key"), after, limitParam(q.Get("limit"), 50))
+		if code := Code(err); code != "" {
+			w.Header().Set(ErrorHeader, code)
+		}
 		answer(w, reading, err)
 	})
 }

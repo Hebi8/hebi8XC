@@ -566,11 +566,40 @@ type Reading struct {
 type NotCachedError struct {
 	Node string
 	Why  string
+	Code string // the word for Why, if it has one: see Code
 }
 
 func (e *NotCachedError) Error() string {
 	return fmt.Sprintf("%s %s and this session has not been read on this machine before, so there is no copy of it here",
 		e.Node, e.Why)
+}
+
+// ErrorHeader is a header of an answer that says a session cannot be read.
+// The answer itself is a sentence for a person, in English; the header
+// gives the reason as one word, so that a program can say it in its own
+// words. It is not sent for a reason that has no word.
+const ErrorHeader = "H8c-Error"
+
+// The words for why a session cannot be read.
+const (
+	CodeNotFound      = "not-found"             // no such session, or no longer
+	CodeOffline       = "offline-not-read"      // its node is offline, and there is no copy
+	CodeIncompatible  = "incompatible-not-read" // its node speaks another protocol, and there is no copy
+	CodeFeedRestarted = "feed-restarted"        // its node started its feed over; a moment later it can be read
+)
+
+// Code returns the word for a failure of Read, or "".
+func Code(err error) string {
+	var notCached *NotCachedError
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return CodeNotFound
+	case errors.Is(err, ErrFeedChanged):
+		return CodeFeedRestarted
+	case errors.As(err, &notCached):
+		return notCached.Code
+	}
+	return ""
 }
 
 // Read returns a page of the session key on the node named node: messages
@@ -639,18 +668,18 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 	// the session is the same, making it again would end the same way.
 	fresh := cached && have.Rev >= rev
 
-	why := "is offline"
+	why, code := "is offline", CodeOffline
 	if !fresh {
 		for _, p := range s.Peers() {
 			if p.ID != n.ID || !p.Online {
 				continue
 			}
 			if p.Protocol != s.Protocol {
-				why = fmt.Sprintf("speaks protocol %d while this node speaks %d", p.Protocol, s.Protocol)
+				why, code = fmt.Sprintf("speaks protocol %d while this node speaks %d", p.Protocol, s.Protocol), CodeIncompatible
 				break
 			}
 			if p.Addr == "" {
-				why = "cannot be reached from here"
+				why, code = "cannot be reached from here", ""
 				break
 			}
 			made, err := s.fetchCopy(ctx, p, key)
@@ -666,11 +695,11 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 				// older copy went with it.
 				return Cached{}, fmt.Errorf("%s restarted its session feed; try again in a moment: %w", n.Name, err)
 			}
-			why = "did not answer (" + err.Error() + ")"
+			why, code = "did not answer ("+err.Error()+")", ""
 		}
 	}
 	if !cached {
-		return Cached{}, &NotCachedError{Node: n.Name, Why: why}
+		return Cached{}, &NotCachedError{Node: n.Name, Why: why, Code: code}
 	}
 	out.From = "cache"
 	at := have.FetchedAt.UTC()
