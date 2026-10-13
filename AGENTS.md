@@ -1,6 +1,6 @@
 # hebi8XC
 
-Nodes on one user's machines that find each other, authenticate and connect directly. Go, single binary `h8c`. Read [docs/design.md](docs/design.md) before changing behavior.
+Nodes on one user's machines that find each other, authenticate and connect directly. Go, single binary `h8c`. Read [docs/design.md](docs/design.md) before changing behavior. What is done and what is left is in [docs/roadmap.md](docs/roadmap.md); keep it current when a listed item is finished or a new limit is found.
 
 Module `github.com/Hebi8/hebi8XC`, default branch `master`.
 
