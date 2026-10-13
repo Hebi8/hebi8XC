@@ -151,7 +151,11 @@ func listSessions(dir string, args []string, out io.Writer) error {
 	}
 	fmt.Fprintln(out)
 	for _, n := range list.Nodes {
-		fmt.Fprintf(out, "%s: %d sessions, %s\n", n.Name, n.Sessions, nodeState(n))
+		noun := "sessions"
+		if n.Sessions == 1 {
+			noun = "session"
+		}
+		fmt.Fprintf(out, "%s: %d %s, %s\n", n.Name, n.Sessions, noun, nodeState(n))
 	}
 	return nil
 }

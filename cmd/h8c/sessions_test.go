@@ -79,7 +79,7 @@ func TestSessionsCommand(t *testing.T) {
 			t.Errorf("line %d does not start with the session's name: %s", i+1, line)
 		}
 	}
-	if !strings.HasPrefix(lines[5], "laptop: 1 sessions, this node") ||
+	if !strings.HasPrefix(lines[5], "laptop: 1 session, this node") ||
 		!strings.HasPrefix(lines[6], "desk: 2 sessions, online, read 20") {
 		t.Errorf("node lines:\n%s\n%s", lines[5], lines[6])
 	}
