@@ -46,8 +46,8 @@ type Message struct {
 	Truncated bool   `json:"truncated,omitempty"` // Text is only the beginning
 }
 
-// Source is the index of the sessions on this machine. The first one reads
-// the index that Wake keeps; see package wake.
+// Source is the index of the sessions on this machine. Implementations read
+// Wake and Antigravity ACP; Combined merges their listings and routes reads.
 type Source interface {
 	// Sessions returns every session of this machine.
 	Sessions(ctx context.Context) ([]Session, error)

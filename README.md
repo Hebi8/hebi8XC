@@ -87,11 +87,12 @@ laptop: 1 session, offline, as of 2026-10-12 23:40:11
 
 Sessions of a machine that is off are still listed, as they were when it was last seen. A session you have read before can still be read then; one you have not cannot. `--json` on both commands prints the same data for programs. Other filters: `--agent`, `--project`, `--limit`.
 
-`h8c` does not read the agents' files itself. It uses the index of [Wake](https://github.com/iAmCorey/Wake), so a machine shares its sessions when Wake's index is there:
+`h8c` reads the index of [Wake](https://github.com/iAmCorey/Wake) for most agents, and reads Antigravity ACP conversations directly:
 
 - Get Wake from its [releases](https://github.com/iAmCorey/Wake/releases) (tested with v0.9.2; [where `wake-cli` is in each platform's file](docs/running-as-a-service.md)) and put `wake-cli` on your PATH, or pass `h8c up --wake-cli /path/to/wake-cli`.
 - That is all. `h8c up` builds the index on its first start if there is none, which took about 40 seconds for 4500 sessions, and refreshes it every two minutes. While the Wake app is open, the app keeps the index current and `h8c` only reads it.
 - The index is the one Wake uses itself, at Wake's default place. `--wake-db` points `h8c` at another.
+- Antigravity ACP sessions are also read directly from `~/.gemini/antigravity-acp/conversations` (override with `--acp-dir`), without Wake. They appear as `antigravity-acp`; if Wake has the same native session ID, the ACP copy wins. Only user and assistant text is included.
 
 A machine without Wake still lists and reads the sessions of the others. The index is read-only to `h8c`, and it never leaves the machine as a whole: other nodes get the list of sessions, and the text of a session when someone reads it.
 

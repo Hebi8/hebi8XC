@@ -274,7 +274,14 @@ var wakeDBs = map[string]string{}
 func TestMain(m *testing.M) {
 	// No test may find or run a real wake-cli, or read a real Wake index.
 	findWakeCLI = func(named string) (string, bool) { return named, named != "" }
-	os.Exit(m.Run())
+	acpRoot, err := os.MkdirTemp("", "h8c-test-acp-")
+	if err != nil {
+		panic(err)
+	}
+	defaultACPPath = func() (string, error) { return filepath.Join(acpRoot, "missing"), nil }
+	code := m.Run()
+	os.RemoveAll(acpRoot)
+	os.Exit(code)
 }
 
 // startUp does what h8c up does, except that the test runs the rounds.

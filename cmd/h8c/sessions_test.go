@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,8 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Hebi8/hebi8XC/internal/identity"
 	"github.com/Hebi8/hebi8XC/internal/node"
 	"github.com/Hebi8/hebi8XC/internal/sessions"
+	"github.com/Hebi8/hebi8XC/internal/sessions/antigravity/acptest"
 	"github.com/Hebi8/hebi8XC/internal/sessions/wake/waketest"
 )
 
@@ -444,5 +447,31 @@ func TestBuildColumn(t *testing.T) {
 		if got := nodeState(*n, 1); got != want {
 			t.Errorf("nodeState(%+v) = %q, want %q", *n, got, want)
 		}
+	}
+}
+
+func TestUpCombinesACPAndWake(t *testing.T) {
+	wake := waketest.New(t, t.TempDir())
+	wake.Put(waketest.Session{Key: "antigravity:example", Agent: "antigravity", Title: "Old copy"}, waketest.Message{Role: "user", Text: "old"})
+	wake.Put(waketest.Session{Key: "codex:other", Agent: "codex", Title: "Other agent"}, waketest.Message{Role: "user", Text: "other"})
+	acpDir := t.TempDir()
+	acp := acptest.New(t, acpDir, "example")
+	acp.Put(0, "user", "native text", "", "", 1000)
+	svc, closeAll, err := openSessions(t.TempDir(), upOptions{wakeDB: wake.Path, acpDir: acpDir}, &identity.Identity{ID: "desk", Name: "desk"}, slogTo(new(bytes.Buffer)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeAll()
+	svc.SyncLocal(context.Background())
+	pg, err := svc.LocalMessages(context.Background(), "antigravity-acp:example", 0, 10)
+	if err != nil || len(pg.Messages) != 1 || pg.Messages[0].Text != "native text" {
+		t.Fatal(pg, err)
+	}
+	if _, err := svc.LocalMessages(context.Background(), "antigravity:example", 0, 10); !errors.Is(err, sessions.ErrNotFound) {
+		t.Fatal(err)
+	}
+	pg, err = svc.LocalMessages(context.Background(), "codex:other", 0, 10)
+	if err != nil || len(pg.Messages) != 1 || pg.Messages[0].Text != "other" {
+		t.Fatal(pg, err)
 	}
 }

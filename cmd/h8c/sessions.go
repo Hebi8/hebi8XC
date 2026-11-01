@@ -20,6 +20,7 @@ import (
 	"github.com/Hebi8/hebi8XC/internal/identity"
 	"github.com/Hebi8/hebi8XC/internal/node"
 	"github.com/Hebi8/hebi8XC/internal/sessions"
+	"github.com/Hebi8/hebi8XC/internal/sessions/antigravity"
 	"github.com/Hebi8/hebi8XC/internal/sessions/wake"
 )
 
@@ -27,9 +28,12 @@ import (
 // a wake-cli that happens to be installed.
 var findWakeCLI = wake.FindCLI
 
+// Replaced by tests so they never read real ACP conversations.
+var defaultACPPath = antigravity.DefaultPath
+
 // openSessions builds the session module of a node. Sessions of other
 // nodes are always listed and cached. Those of this machine are shared when
-// there is a Wake index to read them from, or wake-cli to build one.
+// there is a Wake index or an Antigravity ACP conversations directory.
 func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.Logger) (*sessions.Service, func(), error) {
 	store, err := sessions.OpenStore(filepath.Join(dir, node.SessionsFile), time.Now)
 	if err != nil {
@@ -42,11 +46,23 @@ func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.L
 		Log:   log,
 	}
 	closeAll := func() { store.Close() }
+	combined := &sessions.Combined{}
+	svc.Source = combined
+	acpDir := o.acpDir
+	if acpDir == "" {
+		acpDir, err = defaultACPPath()
+		if err != nil {
+			log.Warn("cannot locate Antigravity ACP conversations", "err", err)
+		}
+	}
+	if acpDir != "" {
+		combined.Sources = append(combined.Sources, antigravity.Open(acpDir))
+	}
 
 	db := o.wakeDB
 	if db == "" {
 		if db, err = wake.DefaultPath(); err != nil {
-			log.Warn("sessions of this machine are not shared: cannot tell where Wake keeps its index", "err", err)
+			log.Warn("cannot tell where Wake keeps its index", "err", err)
 			return svc, closeAll, nil
 		}
 	}
@@ -57,7 +73,7 @@ func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.L
 	// fails. One that is built later, by Wake or by hand, is picked up
 	// without a restart; until then the module says that there is none.
 	index := wake.Open(db)
-	svc.Source = index
+	combined.Sources = append([]sessions.Source{index}, combined.Sources...)
 	return svc, func() { index.Close(); store.Close() }, nil
 }
 

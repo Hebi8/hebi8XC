@@ -125,6 +125,7 @@ type upOptions struct {
 	discover string
 	wakeDB   string
 	wakeCLI  string
+	acpDir   string
 	web      string // "" and "none" leave the web interface off
 }
 
@@ -135,6 +136,7 @@ func up(dir string, args []string) error {
 	fs.StringVar(&o.user, "user", "", "without a GitHub login: user id shared by all of your nodes (default: OS user name)")
 	fs.StringVar(&o.discover, "discover", "mdns,tailscale", "automatic discovery sources: mdns, tailscale, none")
 	fs.StringVar(&o.wakeDB, "wake-db", "", "session index of this machine (default: where Wake keeps it)")
+	fs.StringVar(&o.acpDir, "acp-dir", "", "Antigravity ACP conversations directory (default: ~/.gemini/antigravity-acp/conversations)")
 	fs.StringVar(&o.wakeCLI, "wake-cli", "", "wake-cli, to keep the index current (default: the one on PATH)")
 	fs.StringVar(&o.web, "web", "127.0.0.1:"+strconv.Itoa(node.DefaultPort+1),
 		"address of the web interface: 127.0.0.1, localhost or [::1], and a port; none turns it off")

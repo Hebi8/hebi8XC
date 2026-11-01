@@ -159,7 +159,7 @@ func Start(ctx context.Context, o Options) (n *Net, err error) {
 	web := "127.0.0.1:" + strconv.Itoa(ports[1])
 	up := func(i int, more ...string) (*proc, error) {
 		args := append([]string{"--listen", addr(i), "--discover", "none", "--user", "alice",
-			"--wake-db", dbs[i].Path, "--wake-cli", filepath.Join(dir, "no-wake-cli")}, more...)
+			"--acp-dir", filepath.Join(dir, "no-acp"), "--wake-db", dbs[i].Path, "--wake-cli", filepath.Join(dir, "no-wake-cli")}, more...)
 		return n.up(ctx, names[i], n.data(i), args...)
 	}
 
