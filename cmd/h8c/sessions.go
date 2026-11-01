@@ -56,7 +56,7 @@ func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.L
 		}
 	}
 	if acpDir != "" {
-		combined.Sources = append(combined.Sources, antigravity.Open(acpDir))
+		combined.ACP = antigravity.Open(acpDir)
 	}
 
 	db := o.wakeDB
@@ -73,7 +73,7 @@ func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.L
 	// fails. One that is built later, by Wake or by hand, is picked up
 	// without a restart; until then the module says that there is none.
 	index := wake.Open(db)
-	combined.Sources = append([]sessions.Source{index}, combined.Sources...)
+	combined.Wake = index
 	return svc, func() { index.Close(); store.Close() }, nil
 }
 

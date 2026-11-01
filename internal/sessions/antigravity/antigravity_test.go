@@ -3,10 +3,13 @@ package antigravity
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Hebi8/hebi8XC/internal/sessions"
@@ -29,7 +32,7 @@ func TestSessionsAndMessages(t *testing.T) {
 		t.Fatalf("list: %v %v", list, err)
 	}
 	s := list[0]
-	if s.Key != "antigravity-acp:example" || s.Agent != Agent || s.Title != "" || s.Project != "project" || s.ProjectPath != "/home/alice/project" || s.Model != "example-model" || s.Messages != 2 || s.CreatedAt != 1700000000123 || s.UpdatedAt != 1700000002173 {
+	if s.Key != "antigravity-acp:example" || s.Agent != Agent || s.Title != "你好 Please fix the parser." || s.Project != "project" || s.ProjectPath != "/home/alice/project" || s.Model != "example-model" || s.Messages != 2 || s.CreatedAt != 1700000000123 || s.UpdatedAt != 1700000002173 {
 		t.Fatalf("session: %+v", s)
 	}
 	msgs, more, err := x.Messages(ctx, s.Key, 0, 1, sessions.PageBudget)
@@ -183,5 +186,171 @@ func TestProtoBounds(t *testing.T) {
 	text, cut, err := child.text(10)
 	if err != nil || cut || text != "known" || read > 100 {
 		t.Fatal(text, cut, err, read)
+	}
+}
+
+func TestUnchangedStampReusesSession(t *testing.T) {
+	dir := t.TempDir()
+	d := acptest.New(t, dir, "cached")
+	d.Put(0, "user", "First title", "", "", 1000)
+	d.Exec("PRAGMA journal_mode=DELETE")
+	if err := d.SQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	x := Open(dir)
+	before, err := x.Sessions(ctx)
+	if err != nil || len(before) != 1 {
+		t.Fatal(before, err)
+	}
+	st, err := os.Stat(d.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replace the contents with another valid database, preserving size and mtime.
+	other := acptest.New(t, t.TempDir(), "replacement")
+	other.Put(0, "user", "Other title", "", "", 1000)
+	other.Exec("PRAGMA journal_mode=DELETE")
+	if err := other.SQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(other.Path)
+	if err != nil || int64(len(data)) != st.Size() {
+		t.Fatal("replacement must have the same size", len(data), err)
+	}
+	if err := os.WriteFile(d.Path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(d.Path, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if stamp, err := fileStamp(d.Path); err != nil || stamp != before[0].Stamp {
+		t.Fatal("test must preserve the stamp", stamp, err)
+	}
+	if fresh, err := x.session(ctx, "cached.db"); err != nil || fresh.Title != "Other title" {
+		t.Fatal("an uncached read must see the replacement", fresh, err)
+	}
+	after, err := x.Sessions(ctx)
+	if err != nil || !slices.Equal(before, after) {
+		t.Fatal(after, err)
+	}
+}
+
+func TestFailedReadRetainsSessionAndRetries(t *testing.T) {
+	dir := t.TempDir()
+	d := acptest.New(t, dir, "recover")
+	d.Put(0, "user", "First title", "", "", 1000)
+	x := Open(dir)
+	before, err := x.Sessions(ctx)
+	if err != nil || len(before) != 1 {
+		t.Fatal(before, err)
+	}
+	d.Exec("UPDATE steps SET step_payload=X'ff' WHERE idx=0")
+	stamp, err := fileStamp(d.Path)
+	if err != nil || stamp == before[0].Stamp {
+		t.Fatal("test must change the stamp", stamp, err)
+	}
+	if _, err := x.session(ctx, "recover.db"); err == nil {
+		t.Fatal("test database should fail to parse")
+	}
+	after, err := x.Sessions(ctx)
+	if err != nil || !slices.Equal(before, after) {
+		t.Fatal("a failed read must keep all prior metadata, including stamp", after, err)
+	}
+	d.Put(0, "user", "Recovered title", "", "", 2000)
+	after, err = x.Sessions(ctx)
+	if err != nil || len(after) != 1 || after[0].Title != "Recovered title" || after[0].UpdatedAt != 2050 {
+		t.Fatal("a repaired file must be retried", after, err)
+	}
+}
+
+func TestDeletedFileRemovesSession(t *testing.T) {
+	dir := t.TempDir()
+	d := acptest.New(t, dir, "deleted")
+	d.Put(0, "user", "First title", "", "", 1000)
+	if err := d.SQL.Close(); err != nil {
+		t.Fatal(err)
+	}
+	x := Open(dir)
+	if list, err := x.Sessions(ctx); err != nil || len(list) != 1 {
+		t.Fatal(list, err)
+	}
+	if err := os.Remove(d.Path); err != nil {
+		t.Fatal(err)
+	}
+	if list, err := x.Sessions(ctx); err != nil || len(list) != 0 {
+		t.Fatal("deleted file must leave the list", list, err)
+	}
+}
+
+func TestTitles(t *testing.T) {
+	for _, tc := range []struct{ name, text, want string }{
+		{"whitespace", " \n\t你好\r\n  example\u3000project \n", "你好 example project"},
+		{"unicode", strings.Repeat("世", 81), strings.Repeat("世", 80)},
+		{"collapse before truncating", "first" + strings.Repeat(" \n", 300) + strings.Repeat("好", 80), "first " + strings.Repeat("好", 74)},
+		{"blank", " \n\t", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			d := acptest.New(t, dir, "title")
+			d.Put(0, "assistant", "Earlier assistant text", "", "", 1000)
+			d.Put(1, "user", tc.text, "", "", 2000)
+			d.Put(2, "user", "Later user text", "", "", 3000)
+			list, err := Open(dir).Sessions(ctx)
+			if err != nil || len(list) != 1 || list[0].Title != tc.want {
+				t.Fatal(list, err)
+			}
+		})
+	}
+	dir := t.TempDir()
+	d := acptest.New(t, dir, "assistant-only")
+	d.Put(0, "assistant", "Only assistant text", "", "", 1000)
+	if list, err := Open(dir).Sessions(ctx); err != nil || len(list) != 1 || list[0].Title != "" {
+		t.Fatal(list, err)
+	}
+}
+
+func BenchmarkSessions(b *testing.B) {
+	dir := b.TempDir()
+	for i := 0; i < 219; i++ {
+		d := acptest.New(b, dir, fmt.Sprintf("example-%03d", i))
+		d.Exec("BEGIN")
+		for step := int64(0); step < 200; step++ {
+			role := "user"
+			if step%2 != 0 {
+				role = "assistant"
+			}
+			d.Put(step, role, "Please update the example parser.", "", "example-model", 1700000000000+step)
+		}
+		d.Exec("COMMIT")
+		if err := d.SQL.Close(); err != nil {
+			b.Fatal(err)
+		}
+		// Keep the benchmark independent of the clock and filesystem precision.
+		stamp := time.Unix(1700000000, 0)
+		if err := os.Chtimes(d.Path, stamp, stamp); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for _, name := range []string{"Cold", "Unchanged"} {
+		b.Run(name, func(b *testing.B) {
+			x := Open(dir)
+			// Opening a closed WAL database can create its empty WAL. Warm
+			// again so the first measured unchanged round has that stamp too.
+			for warm := 0; warm < 2; warm++ {
+				if list, err := x.Sessions(ctx); err != nil || len(list) != 219 {
+					b.Fatal(len(list), err)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if name == "Cold" {
+					x = Open(dir)
+				}
+				if list, err := x.Sessions(ctx); err != nil || len(list) != 219 {
+					b.Fatal(len(list), err)
+				}
+			}
+		})
 	}
 }

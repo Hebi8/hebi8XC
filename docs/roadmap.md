@@ -10,7 +10,7 @@ Updated on 2026-11-02. How things work is in [design.md](design.md); this page s
 - **Connection.** Nodes connect directly over mutual TLS 1.3 and accept only keys from the roster. No hub.
 - **Protocol compatibility.** Builds of the same protocol version work together, so machines are updated one at a time. Samples of the wire format are kept as tests.
 - **Sessions.** A node reads the index that [Wake](https://github.com/iAmCorey/Wake) keeps of the agent sessions on its machine and keeps it fresh with `wake-cli`. Nodes exchange their lists; the text of a session is fetched when someone reads it and kept as a copy. A machine that is off is still listed, and what was read before can still be read.
-- **Antigravity ACP.** Reads the native per-session SQLite databases alongside Wake, including live WAL data and `.meta` project paths. Native IDs deduplicate overlapping Wake entries. Shares user and assistant text with bounded paging; no native title, tools, attachments or thinking.
+- **Antigravity ACP.** Reads the native per-session SQLite databases alongside Wake, including live WAL data and `.meta` project paths. Native IDs deduplicate overlapping Wake entries. Shares user and assistant text with bounded paging and titles from the first user message (one line, 80 characters). Unchanged files reuse cached metadata; read failures retain the last successful result until the file is deleted. Wake and ACP retain their last successful lists independently, and message reads work before the first listing. Tools, attachments and thinking are not included.
 - **Three ways to use it.** `h8c sessions` and `h8c show`; `--json` on both for programs; a read-only page in the browser (`h8c web`).
 - **Platforms.** Linux, macOS and Windows, as a service on each: see [running-as-a-service.md](running-as-a-service.md).
 - **Tools for working on it.** `go run ./scripts/demo` and `go run ./scripts/websmoke`, described in `AGENTS.md`.
@@ -49,8 +49,8 @@ Roughly in the order that seems most useful. None of it is started.
 - Whether Windows needs the UDP 5353 firewall rule for mDNS has not been checked.
 - Copies of sessions are never removed from a node's cache.
 - The link from `h8c web` stays in the browser's history, and there is no way to log a browser out short of deleting `web.token`.
-- The ACP adapter depends on an undocumented protobuf/SQLite format; unreadable individual files are skipped. Missing native titles and non-text steps are not reconstructed.
-- The Wake adapter is written against v0.9.2. A newer Wake may change its index; the node then stops sharing its own sessions and says so, and the adapter needs a look.
+- The ACP adapter depends on an undocumented protobuf/SQLite format; unreadable individual files retain their last successful metadata, or are skipped if never read successfully. Native titles and non-text steps are not reconstructed.
+- The Wake adapter is written against v0.9.2. A newer Wake may change its index; its last successful list then stays while ACP updates. Without a successful Wake listing, the local listing fails and the adapter needs a look.
 - Reading the roster uses GitHub's allowance for requests without a token, 60 an hour per public address, shared by every machine behind the same router. A node uses 8 an hour.
 
 The longer list is under "Known limits" in [design.md](design.md#known-limits).

@@ -15,6 +15,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"unicode"
 
 	"github.com/Hebi8/hebi8XC/internal/sessions"
 	_ "modernc.org/sqlite"
@@ -22,7 +24,11 @@ import (
 
 const Agent = "antigravity-acp"
 
-type Index struct{ dir string }
+type Index struct {
+	dir   string
+	mu    sync.Mutex
+	cache map[string]sessions.Session
+}
 
 func Open(dir string) *Index { return &Index{dir: dir} }
 
@@ -104,6 +110,8 @@ func messageText(payload proto, typ int) (proto, string, error) {
 }
 
 func (x *Index) Sessions(ctx context.Context) ([]sessions.Session, error) {
+	x.mu.Lock()
+	defer x.mu.Unlock()
 	files, err := os.ReadDir(x.dir)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("%w: no Antigravity ACP directory", sessions.ErrNoIndex)
@@ -112,6 +120,7 @@ func (x *Index) Sessions(ctx context.Context) ([]sessions.Session, error) {
 		return nil, err
 	}
 	var out []sessions.Session
+	next := make(map[string]sessions.Session)
 	for _, file := range files {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -119,28 +128,79 @@ func (x *Index) Sessions(ctx context.Context) ([]sessions.Session, error) {
 		if file.IsDir() || !strings.HasSuffix(file.Name(), ".db") {
 			continue
 		}
-		s, err := x.session(ctx, file.Name())
-		// An unreadable individual conversation does not hide the other ones.
-		if err == nil {
+		name := file.Name()
+		s, cached := x.cache[name]
+		stamp, err := fileStamp(filepath.Join(x.dir, name))
+		if err == nil && (!cached || s.Stamp != stamp) {
+			var fresh sessions.Session
+			fresh, err = x.session(ctx, name)
+			if err == nil {
+				fresh.Stamp = stamp
+				s = fresh
+			}
+		}
+		// Retain the last successful read until the file leaves the directory.
+		// Keep its old stamp so a failed read is retried on the next round.
+		if err == nil || cached {
+			next[name] = s
 			out = append(out, s)
 		}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	x.cache = next
 	return out, nil
+}
+
+func fileStamp(path string) (string, error) {
+	var stamp string
+	// Include WAL changes: the main db's stat alone misses active sessions.
+	for _, suffix := range []string{"", "-wal"} {
+		st, err := os.Stat(path + suffix)
+		if suffix == "-wal" && errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		stamp += fmt.Sprintf("%d:%d;", st.Size(), st.ModTime().UnixNano())
+	}
+	return stamp, nil
+}
+
+// Read in bounded chunks, collapsing whitespace before counting characters.
+func title(text proto) (string, error) {
+	var out []rune
+	space := false
+	for text.size > 0 {
+		part, _, err := text.text(256)
+		if err != nil {
+			return "", err
+		}
+		for _, r := range part {
+			if unicode.IsSpace(r) {
+				space = len(out) > 0
+				continue
+			}
+			if space {
+				out = append(out, ' ')
+				space = false
+			}
+			out = append(out, r)
+			if len(out) >= 80 {
+				return string(out[:80]), nil
+			}
+		}
+		text.offset += int64(len(part))
+		text.size -= int64(len(part))
+	}
+	return string(out), nil
 }
 
 func (x *Index) session(ctx context.Context, name string) (sessions.Session, error) {
 	path := filepath.Join(x.dir, name)
 	s := sessions.Session{Key: Agent + ":" + strings.TrimSuffix(name, ".db"), Agent: Agent}
-	// Include WAL changes: the main db's stat alone misses active sessions.
-	for _, suffix := range []string{"", "-wal"} {
-		st, err := os.Stat(path + suffix)
-		if err == nil {
-			s.Stamp += fmt.Sprintf("%d:%d;", st.Size(), st.ModTime().UnixNano())
-		}
-	}
 	db, tx, err := open(ctx, path)
 	if err != nil {
 		return s, err
@@ -160,6 +220,7 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 		return s, err
 	}
 	defer rows.Close()
+	titled := false
 	for rows.Next() {
 		var idx, ms, ps int64
 		var typ int
@@ -200,6 +261,13 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 			}
 			if text.size > 0 {
 				s.Messages++
+				if typ == 14 && !titled {
+					s.Title, err = title(text)
+					if err != nil {
+						return s, err
+					}
+					titled = true
+				}
 			}
 		}
 	}
@@ -216,8 +284,6 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 			s.Project = filepath.Base(meta.CWD)
 		}
 	}
-	// No title field is stored in these tables. Leave it empty, as with
-	// unknown branch/parent/model values; do not guess from unrelated blobs.
 	return s, nil
 }
 

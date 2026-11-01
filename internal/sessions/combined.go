@@ -9,43 +9,44 @@ import (
 	"sync"
 )
 
-// Combined publishes several local sources. Sources later in the list win
-// duplicate keys. An ACP-native copy also wins over Wake's antigravity:<id>:
+// Combined publishes Wake and ACP sessions. An ACP-native copy wins over Wake's antigravity:<id>:
 // the native database is current without waiting for Wake to refresh.
 // Titles and paths are not identities: only the same native id is deduplicated.
 type Combined struct {
-	Sources []Source
-	mu      sync.Mutex
-	seen    map[int]bool
-	routes  map[string]Source
+	Wake, ACP Source
+	mu        sync.Mutex
+	last      map[int][]Session
 }
 
 func (c *Combined) Sessions(ctx context.Context) ([]Session, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.seen == nil {
-		c.seen = make(map[int]bool)
+	if c.last == nil {
+		c.last = make(map[int][]Session)
 	}
-	routes := make(map[string]Source)
 	all := make(map[string]Session)
 	var missing error
 	available := false
-	for i, source := range c.Sources {
+	for i, source := range []Source{c.Wake, c.ACP} {
+		if source == nil {
+			continue
+		}
 		list, err := source.Sessions(ctx)
 		if err != nil {
-			// A source that has never existed is optional. Losing an existing
-			// source must not turn its whole feed into deletions.
-			if errors.Is(err, ErrNoIndex) && !c.seen[i] {
+			if previous, ok := c.last[i]; ok {
+				list = previous
+			} else if errors.Is(err, ErrNoIndex) {
 				missing = errors.Join(missing, err)
 				continue
+			} else {
+				return nil, err
 			}
-			return nil, err
+		} else {
+			c.last[i] = list
 		}
-		c.seen[i] = true
 		available = true
 		for _, s := range list {
 			all[s.Key] = s
-			routes[s.Key] = source
 		}
 	}
 	if !available {
@@ -57,7 +58,6 @@ func (c *Combined) Sessions(ctx context.Context) ([]Session, error) {
 	for key := range all {
 		if id, ok := strings.CutPrefix(key, "antigravity-acp:"); ok {
 			delete(all, "antigravity:"+id)
-			delete(routes, "antigravity:"+id)
 		}
 	}
 	out := make([]Session, 0, len(all))
@@ -65,14 +65,14 @@ func (c *Combined) Sessions(ctx context.Context) ([]Session, error) {
 		out = append(out, s)
 	}
 	slices.SortFunc(out, func(a, b Session) int { return cmp.Compare(a.Key, b.Key) })
-	c.routes = routes
 	return out, nil
 }
 
 func (c *Combined) Messages(ctx context.Context, key string, after int64, limit, budget int) ([]Message, bool, error) {
-	c.mu.Lock()
-	source := c.routes[key]
-	c.mu.Unlock()
+	source := c.Wake
+	if strings.HasPrefix(key, "antigravity-acp:") {
+		source = c.ACP
+	}
 	if source == nil {
 		return nil, false, ErrNotFound
 	}
