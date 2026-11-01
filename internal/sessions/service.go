@@ -174,6 +174,12 @@ func (s *Service) SyncLocal(ctx context.Context) {
 		s.setLocalNote(err.Error())
 		return
 	}
+	if stale, ok := s.Source.(interface{ Stale() error }); ok && stale.Stale() != nil {
+		note := "showing the last list of a source that cannot be read: " + stale.Stale().Error()
+		s.say(slog.LevelWarn, "source", note)
+		s.setLocalNote(note)
+		return
+	}
 	s.setLocalNote("")
 	s.say(slog.LevelInfo, "source", fmt.Sprintf("sharing the sessions of this machine (%d)", len(current)))
 	if changed > 0 {

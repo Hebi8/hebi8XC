@@ -16,6 +16,7 @@ type Combined struct {
 	Wake, ACP Source
 	mu        sync.Mutex
 	last      map[int][]Session
+	stale     error
 }
 
 func (c *Combined) Sessions(ctx context.Context) ([]Session, error) {
@@ -24,6 +25,7 @@ func (c *Combined) Sessions(ctx context.Context) ([]Session, error) {
 	if c.last == nil {
 		c.last = make(map[int][]Session)
 	}
+	c.stale = nil
 	all := make(map[string]Session)
 	var missing error
 	available := false
@@ -35,6 +37,7 @@ func (c *Combined) Sessions(ctx context.Context) ([]Session, error) {
 		if err != nil {
 			if previous, ok := c.last[i]; ok {
 				list = previous
+				c.stale = errors.Join(c.stale, err)
 			} else if errors.Is(err, ErrNoIndex) {
 				missing = errors.Join(missing, err)
 				continue
@@ -66,6 +69,13 @@ func (c *Combined) Sessions(ctx context.Context) ([]Session, error) {
 	}
 	slices.SortFunc(out, func(a, b Session) int { return cmp.Compare(a.Key, b.Key) })
 	return out, nil
+}
+
+// Stale returns the errors of the sources whose last successful list the latest Sessions kept, or nil.
+func (c *Combined) Stale() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stale
 }
 
 func (c *Combined) Messages(ctx context.Context, key string, after int64, limit, budget int) ([]Message, bool, error) {

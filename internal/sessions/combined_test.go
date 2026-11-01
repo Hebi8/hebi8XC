@@ -2,6 +2,7 @@ package sessions
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -59,6 +60,9 @@ func TestCombinedOptionalAndFailedSources(t *testing.T) {
 		if err != nil || len(list) != 2 || list[0].Title != "ACP updated" || list[1].Title != "Wake" {
 			t.Fatal("failed source should retain its list while ACP advances", list, err)
 		}
+		if !errors.Is(c.Stale(), failure) {
+			t.Fatal("a retained list should be reported", c.Stale())
+		}
 	}
 	wake.err = nil
 	wake.remove("codex:b")
@@ -66,6 +70,38 @@ func TestCombinedOptionalAndFailedSources(t *testing.T) {
 	acp.err = errors.New("unreadable directory")
 	if list, err := c.Sessions(ctx); err != nil || len(list) != 2 || list[0].Title != "ACP updated" || list[1].Key != "codex:c" {
 		t.Fatal("recovery should publish Wake changes while ACP retains its list", list, err)
+	}
+	if !errors.Is(c.Stale(), acp.err) {
+		t.Fatal("the failing ACP source should be reported", c.Stale())
+	}
+	acp.err = nil
+	if _, err := c.Sessions(ctx); err != nil || c.Stale() != nil {
+		t.Fatal("nothing is stale once every source reads again", err, c.Stale())
+	}
+}
+
+func TestSyncLocalReportsARetainedList(t *testing.T) {
+	desk, _, _ := pair(t)
+	wake, acp := newSource(), newSource()
+	wake.put("codex:a", "Wake", 10, "text")
+	acp.err = ErrNoIndex
+	desk.Source = &Combined{Wake: wake, ACP: acp}
+	desk.SyncLocal(ctx)
+	if note := desk.localNote(); note != "" {
+		t.Fatal("note after a good round:", note)
+	}
+	wake.err = errors.New("broken schema")
+	desk.SyncLocal(ctx)
+	if note := desk.localNote(); !strings.Contains(note, "broken schema") {
+		t.Fatal("a source read from its last list should be noted, got", note)
+	}
+	if got := desk.list(Query{}); len(got.Sessions) != 1 || got.Sessions[0].Key != "codex:a" {
+		t.Fatal("the last list should still be shared", got.Sessions)
+	}
+	wake.err = nil
+	desk.SyncLocal(ctx)
+	if note := desk.localNote(); note != "" {
+		t.Fatal("note after recovery:", note)
 	}
 }
 
