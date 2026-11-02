@@ -156,9 +156,9 @@ func (x *Index) Sessions(ctx context.Context) ([]sessions.Session, error) {
 func fileStamp(path string) (string, error) {
 	var stamp string
 	// Include WAL changes: the main db's stat alone misses active sessions.
-	for _, suffix := range []string{"", "-wal"} {
-		st, err := os.Stat(path + suffix)
-		if suffix == "-wal" && errors.Is(err, os.ErrNotExist) {
+	for i, file := range []string{path, path + "-wal", transcriptPath(path)} {
+		st, err := os.Stat(file)
+		if i > 0 && errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
@@ -200,13 +200,17 @@ func title(text proto) (string, error) {
 
 func (x *Index) session(ctx context.Context, name string) (sessions.Session, error) {
 	path := filepath.Join(x.dir, name)
-	s := sessions.Session{Key: Agent + ":" + strings.TrimSuffix(name, ".db"), Agent: Agent}
+	s := sessions.Session{Key: Agent + ":" + strings.TrimSuffix(name, ".db"), Agent: Agent, Reader: "acp"}
 	db, tx, err := open(ctx, path)
 	if err != nil {
 		return s, err
 	}
 	defer db.Close()
 	defer tx.Rollback()
+	structure, hasTranscript, err := transcript(path)
+	if err != nil {
+		return s, err
+	}
 	var size int64
 	err = tx.QueryRowContext(ctx, "SELECT length(data) FROM trajectory_metadata_blob WHERE id = 'main'").Scan(&size)
 	if err == nil {
@@ -259,7 +263,7 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 			if err != nil {
 				return s, err
 			}
-			if text.size > 0 {
+			if text.size > 0 || len(structure[idx].Calls) > 0 {
 				s.Messages++
 				if typ == 14 && !titled {
 					s.Title, err = title(text)
@@ -273,6 +277,19 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 	}
 	if err := rows.Err(); err != nil {
 		return s, err
+	}
+	if hasTranscript {
+		var calls, errs int64
+		for _, m := range structure {
+			for _, c := range m.Calls {
+				calls++
+				if c.Error {
+					errs++
+				}
+			}
+		}
+		s.ToolCalls = &calls
+		s.ToolErrors = &errs
 	}
 	s.UpdatedAt = max(s.UpdatedAt, s.CreatedAt)
 	var meta struct {
@@ -303,6 +320,10 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 	}
 	defer db.Close()
 	defer tx.Rollback()
+	structure, hasTranscript, err := transcript(path)
+	if err != nil {
+		return nil, false, err
+	}
 	limit = max(1, min(limit, sessions.MaxPage))
 	budget = min(budget, sessions.PageBudget)
 	rows, err := tx.QueryContext(ctx, `SELECT idx,step_type,coalesce(length(metadata),0),coalesce(length(step_payload),0)
@@ -323,18 +344,38 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 		if err != nil {
 			return nil, false, err
 		}
-		if text.size == 0 {
+		if text.size == 0 && len(structure[idx].Calls) == 0 {
 			continue
 		}
 		if len(out) == limit {
 			return out, true, nil
 		}
-		m := sessions.Message{ID: idx + 1, Seq: idx, Role: role}
+		m := structure[idx]
+		m.ID, m.Seq, m.Role = idx+1, idx, role
+		if hasTranscript {
+			m.Kind = "text"
+			model, err := blob(ctx, tx, "steps", "metadata", idx, ms).child(24)
+			if err != nil {
+				return nil, false, err
+			}
+			model, err = model.child(8)
+			if err != nil {
+				return nil, false, err
+			}
+			m.Model, _, err = model.text(4096)
+			if err != nil {
+				return nil, false, err
+			}
+		}
 		m.Time, err = blob(ctx, tx, "steps", "metadata", idx, ms).timestamp(1)
 		if err != nil {
 			return nil, false, err
 		}
-		m.Text, m.Truncated, err = text.text(sessions.MaxText)
+		textLimit := sessions.MaxText
+		if hasTranscript {
+			textLimit = int(text.size)
+		}
+		m.Text, m.Truncated, err = text.text(textLimit)
 		if err != nil {
 			return nil, false, err
 		}

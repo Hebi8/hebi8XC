@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"github.com/Hebi8/hebi8XC/internal/sessions/wake/waketest"
 )
 
@@ -106,6 +107,10 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 		waketest.Message{Role: "assistant", Time: ms - 36*minute,
 			Text: "Both wrap. A block that is opened and never closed stays text:\n\n```sh\ngo vet ./... && go test -race ./..."})
 
+	desk.Structure(d.Code, 2, sessions.Message{Thinking: "Check the last row before changing the loop.", Calls: []sessions.Call{
+		{Call: "read-rows", Tool: "read_file", Input: `{"path":"importer/rows.go"}`, Output: "for i := 0; i < len(rows)-1; i++"},
+		{Call: "test-rows", Tool: "shell", Input: "go test ./importer", Output: "last row missing", Error: true},
+	}})
 	d.Kept = "claude:seed-order"
 	attic.Put(waketest.Session{Key: d.Kept, Agent: "claude", Title: "Seed order for the spring beds",
 		Project: "notes", Path: "/home/alice/notes", UpdatedAt: ms - 19*24*60*minute},

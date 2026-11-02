@@ -126,6 +126,10 @@ func OpenStore(path string, now func() time.Time) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if err := s.migrateStructure(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := s.Epoch(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -230,23 +234,23 @@ func (s *Store) SetLocal(ctx context.Context, self string, current []Session) (c
 func upsert(ctx context.Context, tx *sql.Tx, node string, sess Session, rev int64, p string) error {
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO sessions(node, key, rev, deleted, print, agent, title, project, project_path, branch,
-		                     model, created_at, updated_at, messages, parent, spawned, archived)
-		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     model, created_at, updated_at, messages, parent, spawned, archived, app, reader, tool_calls, tool_errors)
+		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node, key) DO UPDATE SET
 		  rev = excluded.rev, deleted = 0, print = excluded.print, agent = excluded.agent,
 		  title = excluded.title, project = excluded.project, project_path = excluded.project_path,
 		  branch = excluded.branch, model = excluded.model, created_at = excluded.created_at,
 		  updated_at = excluded.updated_at, messages = excluded.messages, parent = excluded.parent,
-		  spawned = excluded.spawned, archived = excluded.archived`,
+		  spawned = excluded.spawned, archived = excluded.archived, app=excluded.app, reader=excluded.reader, tool_calls=excluded.tool_calls, tool_errors=excluded.tool_errors`,
 		node, sess.Key, rev, p, sess.Agent, sess.Title, sess.Project, sess.ProjectPath, sess.Branch,
-		sess.Model, sess.CreatedAt, sess.UpdatedAt, sess.Messages, sess.Parent, sess.Spawned, sess.Archived)
+		sess.Model, sess.CreatedAt, sess.UpdatedAt, sess.Messages, sess.Parent, sess.Spawned, sess.Archived, sess.App, sess.Reader, sess.ToolCalls, sess.ToolErrors)
 	return err
 }
 
 // clamp cuts the descriptive fields of a session to maxField bytes.
 func clamp(sess Session) Session {
 	for _, f := range []*string{&sess.Key, &sess.Agent, &sess.Title, &sess.Project, &sess.ProjectPath,
-		&sess.Branch, &sess.Model, &sess.Parent} {
+		&sess.Branch, &sess.Model, &sess.Parent, &sess.App, &sess.Reader} {
 		if len(*f) > maxField {
 			*f = strings.ToValidUTF8((*f)[:maxField], "")
 		}
@@ -263,13 +267,13 @@ type Change struct {
 }
 
 const sessionColumns = `key, agent, title, project, project_path, branch, model,
-	created_at, updated_at, messages, parent, spawned, archived`
+	created_at, updated_at, messages, parent, spawned, archived, app, reader, tool_calls, tool_errors`
 
 func scanSession(scan func(...any) error, more ...any) (Session, error) {
 	var sess Session
 	dest := append([]any{&sess.Key, &sess.Agent, &sess.Title, &sess.Project, &sess.ProjectPath, &sess.Branch,
 		&sess.Model, &sess.CreatedAt, &sess.UpdatedAt, &sess.Messages, &sess.Parent, &sess.Spawned,
-		&sess.Archived}, more...)
+		&sess.Archived, &sess.App, &sess.Reader, &sess.ToolCalls, &sess.ToolErrors}, more...)
 	return sess, scan(dest...)
 }
 
@@ -535,6 +539,7 @@ func (s *Store) Feeds(ctx context.Context) (map[string]Feed, error) {
 
 // Cached describes the copy of another node's session that is kept here.
 type Cached struct {
+	Format    int
 	Rev       int64 // revision of the session the copy was made from
 	Complete  bool  // false if the copy stops before the end of the session
 	FetchedAt time.Time
@@ -544,8 +549,8 @@ type Cached struct {
 // Cached returns the copy of a session's messages. ok is false if there is none.
 func (s *Store) Cached(ctx context.Context, node, key string) (c Cached, ok bool, err error) {
 	var fetched int64
-	err = s.db.QueryRowContext(ctx, `SELECT gen, rev, complete, fetched_at FROM content WHERE node = ? AND key = ?`,
-		node, key).Scan(&c.gen, &c.Rev, &c.Complete, &fetched)
+	err = s.db.QueryRowContext(ctx, `SELECT gen, rev, complete, fetched_at, format FROM content WHERE node = ? AND key = ?`,
+		node, key).Scan(&c.gen, &c.Rev, &c.Complete, &fetched, &c.Format)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Cached{}, false, nil
 	}
@@ -582,10 +587,12 @@ func (s *Store) AddToCopy(ctx context.Context, node, key string, gen int64, msgs
 	}
 	defer tx.Rollback()
 	for _, m := range msgs {
+		calls, _ := json.Marshal(m.Calls)
+		usage, _ := json.Marshal(m.Usage)
 		if _, err := tx.ExecContext(ctx, `
-			INSERT OR REPLACE INTO messages(node, key, gen, id, seq, sidechain, role, ts, text, truncated)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			node, key, gen, m.ID, m.Seq, m.Sidechain, m.Role, m.Time, m.Text, m.Truncated); err != nil {
+			INSERT OR REPLACE INTO messages(node, key, gen, id, seq, sidechain, role, ts, text, truncated, kind, thinking, calls, usage, model, calls_dropped)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			node, key, gen, m.ID, m.Seq, m.Sidechain, m.Role, m.Time, m.Text, m.Truncated, m.Kind, m.Thinking, string(calls), string(usage), m.Model, m.CallsDropped); err != nil {
 			return err
 		}
 	}
@@ -600,7 +607,7 @@ var ErrFeedChanged = errors.New("the node's session feed changed meanwhile")
 // made while the node's feed had the given epoch; if the feed on record is
 // another one by now, or the session is gone from it, the copy describes
 // something that no longer exists and ErrFeedChanged is returned instead.
-func (s *Store) UseCopy(ctx context.Context, node, key, epoch string, gen, rev int64, complete bool) error {
+func (s *Store) UseCopy(ctx context.Context, node, key, epoch string, gen, rev int64, complete bool, format int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -616,10 +623,10 @@ func (s *Store) UseCopy(ctx context.Context, node, key, epoch string, gen, rev i
 		return ErrFeedChanged
 	}
 	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO content(node, key, gen, rev, complete, fetched_at) VALUES (?, ?, ?, ?, ?, ?)
+		INSERT INTO content(node, key, gen, rev, complete, fetched_at, format) VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node, key) DO UPDATE SET gen = excluded.gen, rev = excluded.rev,
-		  complete = excluded.complete, fetched_at = excluded.fetched_at`,
-		node, key, gen, rev, complete, s.now().UnixMilli()); err != nil {
+		  complete = excluded.complete, fetched_at = excluded.fetched_at, format=excluded.format`,
+		node, key, gen, rev, complete, s.now().UnixMilli(), format); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE node = ? AND key = ? AND gen <> ?`, node, key, gen); err != nil {
@@ -638,7 +645,7 @@ func (s *Store) DropCopy(ctx context.Context, node, key string, gen int64) error
 // after, in order: at most limit, and no more than fit into budget bytes,
 // but always one. more says whether the copy goes on.
 func (s *Store) CachedMessages(ctx context.Context, node, key string, c Cached, after int64, limit, budget int) ([]Message, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, seq, sidechain, role, ts, text, truncated FROM messages
+	rows, err := s.db.QueryContext(ctx, `SELECT id, seq, sidechain, role, ts, text, truncated, kind, thinking, calls, usage, model, calls_dropped FROM messages
 		WHERE node = ? AND key = ? AND gen = ? AND id > ? ORDER BY id LIMIT ?`, node, key, c.gen, after, limit+1)
 	if err != nil {
 		return nil, false, err
@@ -648,7 +655,14 @@ func (s *Store) CachedMessages(ctx context.Context, node, key string, c Cached, 
 	size := 0
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated); err != nil {
+		var calls, usage string
+		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated, &m.Kind, &m.Thinking, &calls, &usage, &m.Model, &m.CallsDropped); err != nil {
+			return nil, false, err
+		}
+		if err := json.Unmarshal([]byte(calls), &m.Calls); err != nil {
+			return nil, false, err
+		}
+		if err := json.Unmarshal([]byte(usage), &m.Usage); err != nil {
 			return nil, false, err
 		}
 		size += MessageSize(m)
@@ -658,4 +672,39 @@ func (s *Store) CachedMessages(ctx context.Context, node, key string, c Cached, 
 		out = append(out, m)
 	}
 	return out, false, rows.Err()
+}
+
+// Phase 1 only adds copy storage; the search and export migrations come later.
+func (s *Store) migrateStructure() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version string
+	err = tx.QueryRow("SELECT v FROM meta WHERE k='schema'").Scan(&version)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	_, err = tx.Exec(`
+ ALTER TABLE sessions ADD COLUMN app TEXT NOT NULL DEFAULT '';
+ ALTER TABLE sessions ADD COLUMN reader TEXT NOT NULL DEFAULT '';
+ ALTER TABLE sessions ADD COLUMN tool_calls INTEGER;
+ ALTER TABLE sessions ADD COLUMN tool_errors INTEGER;
+ ALTER TABLE content ADD COLUMN format INTEGER NOT NULL DEFAULT 0;
+ ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT '';
+ ALTER TABLE messages ADD COLUMN thinking TEXT NOT NULL DEFAULT '';
+ ALTER TABLE messages ADD COLUMN calls TEXT NOT NULL DEFAULT 'null';
+ ALTER TABLE messages ADD COLUMN usage TEXT NOT NULL DEFAULT 'null';
+ ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT '';
+ ALTER TABLE messages ADD COLUMN calls_dropped INTEGER NOT NULL DEFAULT 0;
+ UPDATE sessions SET print='';
+ INSERT INTO meta(k,v) VALUES ('schema','1');`)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }

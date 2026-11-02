@@ -4,7 +4,7 @@
 // read-only and takes from it what package sessions needs.
 //
 // The database is Wake's internal format, not an interface. Everything that
-// depends on it is in this package, written against Wake v0.9.2
+// depends on it is in this package, written against Wake v0.9.2 and v0.10.2
 // (crates/wake-core/src/db.rs):
 //
 //   - sessions holds one row per session. created_at and updated_at are Unix
@@ -29,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -47,7 +48,7 @@ import (
 var required = map[string][]string{
 	"sessions": {"key", "agent_id", "title", "project_path", "project_name", "git_branch",
 		"created_at", "updated_at", "message_count", "model", "archived",
-		"file_size", "file_mtime", "parent_key", "host", "spawned"},
+		"file_size", "file_mtime", "parent_key", "host", "spawned", "source"},
 	"messages": {"id", "session_key", "sidechain_id", "seq", "role", "ts", "text"},
 }
 
@@ -59,7 +60,7 @@ type SchemaError struct {
 }
 
 func (e *SchemaError) Error() string {
-	return fmt.Sprintf("cannot make out the structure of the Wake index at %s: no %s (this reader was written for Wake v0.9.2)",
+	return fmt.Sprintf("cannot make out the structure of the Wake index at %s: no %s (this reader supports Wake v0.9.2 and v0.10.2)",
 		e.Path, e.Missing)
 }
 
@@ -93,12 +94,14 @@ func DefaultPath() (string, error) {
 type Index struct {
 	path string
 
-	mu sync.Mutex
-	db *sql.DB
+	mu   sync.Mutex
+	db   *sql.DB
+	Log  *slog.Logger
+	said map[string]bool
 }
 
 func Open(path string) *Index {
-	return &Index{path: path}
+	return &Index{path: path, Log: slog.Default(), said: make(map[string]bool)}
 }
 
 func (x *Index) Path() string { return x.path }
@@ -188,80 +191,140 @@ func check(ctx context.Context, db *sql.DB, path string) error {
 	return nil
 }
 
-func (x *Index) Sessions(ctx context.Context) ([]sessions.Session, error) {
+func (x *Index) Sessions(ctx context.Context) (result []sessions.Session, err error) {
 	db, err := x.open(ctx)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := db.QueryContext(ctx, `
-		SELECT key, agent_id, title, project_name, project_path, COALESCE(git_branch, ''),
-		       COALESCE(model, ''), COALESCE(created_at, 0), COALESCE(updated_at, 0),
-		       COALESCE(message_count, 0), parent_key, spawned, COALESCE(archived, 0),
-		       COALESCE(file_mtime, 0), COALESCE(file_size, 0)
-		FROM sessions WHERE host = ''`)
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		x.fail(db)
+		return nil, err
+	}
+	defer func() {
+		tx.Rollback()
+		if err != nil {
+			x.fail(db)
+		}
+	}()
+	structured, err := x.structure(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	extra, joins := "'', '', 0, 0, 0", ""
+	if structured {
+		extra = "coalesce(st.file_mtime,'') || ':' || coalesce(st.file_size,'') || ':' || coalesce(st.fts_format,'') || ':' || coalesce(st.rows,'') || ':' || coalesce(st.format,''), coalesce((SELECT value FROM schema_meta WHERE key='fts_format'),''), " + validStructure + ", coalesce(tc.calls,0), coalesce(tc.errors,0)"
+		joins = structureJoin + " LEFT JOIN (SELECT session_key,count(*) calls,sum(is_error) errors FROM tool_calls GROUP BY session_key) tc ON tc.session_key=s.key"
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT s.key,agent_id,title,project_name,project_path,coalesce(git_branch,''),
+ coalesce(model,''),coalesce(created_at,0),coalesce(updated_at,0),coalesce(message_count,0),parent_key,spawned,coalesce(archived,0),
+ coalesce(s.file_mtime,0),coalesce(s.file_size,0),coalesce(source,''),`+extra+` FROM sessions s `+joins+` WHERE host=''`)
+	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []sessions.Session
 	for rows.Next() {
 		var s sessions.Session
-		var mtime, size int64
-		if err := rows.Scan(&s.Key, &s.Agent, &s.Title, &s.Project, &s.ProjectPath, &s.Branch,
-			&s.Model, &s.CreatedAt, &s.UpdatedAt, &s.Messages, &s.Parent, &s.Spawned, &s.Archived,
-			&mtime, &size); err != nil {
-			x.fail(db)
+		var mtime, size, calls, errs int64
+		var stamp, fts string
+		var valid bool
+		if err := rows.Scan(&s.Key, &s.Agent, &s.Title, &s.Project, &s.ProjectPath, &s.Branch, &s.Model, &s.CreatedAt, &s.UpdatedAt, &s.Messages, &s.Parent, &s.Spawned, &s.Archived, &mtime, &size, &s.App, &stamp, &fts, &valid, &calls, &errs); err != nil {
 			return nil, err
 		}
-		s.Stamp = fmt.Sprintf("%d:%d", mtime, size)
+		s.Reader = "wake"
+		s.Stamp = fmt.Sprintf("%d:%d:%s:%s:%t", mtime, size, stamp, fts, valid)
+		if valid {
+			s.ToolCalls = &calls
+			s.ToolErrors = &errs
+		} else if structured {
+			x.note(s.Key, "Wake session structure is stale; showing text only")
+		}
 		out = append(out, s)
 	}
-	if err := rows.Err(); err != nil {
-		x.fail(db)
-		return nil, err
-	}
-	return out, nil
+	return out, rows.Err()
 }
 
-func (x *Index) Messages(ctx context.Context, key string, after int64, limit, budget int) ([]sessions.Message, bool, error) {
+func (x *Index) Messages(ctx context.Context, key string, after int64, limit, budget int) (result []sessions.Message, more bool, err error) {
 	db, err := x.open(ctx)
 	if err != nil {
 		return nil, false, err
 	}
-	// The join keeps this to sessions of this machine, whatever key is asked for.
-	rows, err := db.QueryContext(ctx, `
-		SELECT m.id, m.seq, COALESCE(m.sidechain_id, ''), COALESCE(m.role, ''), COALESCE(m.ts, 0),
-		       substr(m.text, 1, ?), length(m.text) > ?
-		FROM messages m JOIN sessions s ON s.key = m.session_key
-		WHERE m.session_key = ? AND s.host = '' AND m.id > ?
-		ORDER BY m.id LIMIT ?`, sessions.MaxText, sessions.MaxText, key, after, limit+1)
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
-		x.fail(db)
 		return nil, false, err
 	}
-	// Rows are read one at a time and reading stops at the budget: a page of
-	// a long session must not pull hundreds of messages into memory first.
+	defer func() {
+		tx.Rollback()
+		if err != nil {
+			x.fail(db)
+		}
+	}()
+	structured, err := x.structure(ctx, tx)
+	if err != nil {
+		return nil, false, err
+	}
+	var valid bool
+	if structured {
+		err = tx.QueryRowContext(ctx, "SELECT "+validStructure+" FROM sessions s "+structureJoin+" WHERE s.key=? AND s.host=''", key).Scan(&valid)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, false, err
+		}
+		if !valid {
+			x.note(key, "Wake session structure is stale; showing text only")
+		}
+	}
+	text, extra, join := fmt.Sprintf("substr(m.text,1,%d)", sessions.MaxText), fmt.Sprintf("length(m.text)>%d, '', '', ''", sessions.MaxText), ""
+	if valid {
+		text = "coalesce(e.full_text,m.text)"
+		extra = "0, coalesce(e.kind,'text'),coalesce(e.thinking,''),coalesce(e.model,'')"
+		join = " LEFT JOIN message_extras e ON e.session_key=m.session_key AND e.seq=m.seq"
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT m.id,m.seq,coalesce(m.sidechain_id,''),coalesce(m.role,''),coalesce(m.ts,0),`+text+","+extra+`
+ FROM messages m JOIN sessions s ON s.key=m.session_key `+join+` WHERE m.session_key=? AND s.host='' AND m.id>? ORDER BY m.id LIMIT ?`, key, after, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
 	defer rows.Close()
 	var out []sessions.Message
 	size := 0
 	for rows.Next() {
 		var m sessions.Message
-		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated); err != nil {
-			x.fail(db)
+		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated, &m.Kind, &m.Thinking, &m.Model); err != nil {
 			return nil, false, err
 		}
+		if len(out) == limit {
+			return out, true, nil
+		}
+		if valid {
+			calls, err := tx.QueryContext(ctx, `SELECT call_id,name,coalesce(input,''),coalesce(output,''),is_error,coalesce(child_id,'') FROM tool_calls WHERE session_key=? AND seq=? ORDER BY idx`, key, m.Seq)
+			if err != nil {
+				return nil, false, err
+			}
+			for calls.Next() {
+				var c sessions.Call
+				if err := calls.Scan(&c.Call, &c.Tool, &c.Input, &c.Output, &c.Error, &c.Agent); err != nil {
+					calls.Close()
+					return nil, false, err
+				}
+				if c.Agent != "" {
+					agent, _, _ := strings.Cut(key, ":")
+					c.Agent = agent + ":" + c.Agent
+				}
+				m.Calls = append(m.Calls, c)
+			}
+			err = calls.Err()
+			calls.Close()
+			if err != nil {
+				return nil, false, err
+			}
+		}
 		size += sessions.MessageSize(m)
-		if len(out) == limit || (size > budget && len(out) > 0) {
+		if size > budget && len(out) > 0 {
 			return out, true, nil
 		}
 		out = append(out, m)
 	}
-	if err := rows.Err(); err != nil {
-		x.fail(db)
-		return nil, false, err
-	}
-	return out, false, nil
+	return out, false, rows.Err()
 }
 
 // CLI runs wake-cli to keep the index current while Wake itself is closed.

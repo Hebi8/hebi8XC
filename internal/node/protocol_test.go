@@ -365,3 +365,32 @@ func TestHelloSaysProtocolAndVersion(t *testing.T) {
 		}
 	}
 }
+
+// The structure sample is additive to the original protocol-1 samples.
+func TestStructuredProtocol1Answers(t *testing.T) {
+	c := newClock()
+	laptop := sessionNode(t, c, "laptop")
+	read := func(name string) []byte {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join("testdata", "protocol-v1-structure", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	remote := recordedNode(t, laptop, sample(t, "hello.response.json"), read("sessions.response.json"), read("messages.response.json"))
+	laptop.static = []string{remote.addr}
+	laptop.round()
+	laptop.sessions.Round(context.Background())
+	var r sessions.Reading
+	if err := laptop.control("/v1/sessions/messages?node=desk&key=claude:0f3a9c", &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.Format != 1 || r.Session.Reader != "wake" || r.Session.ToolCalls == nil || *r.Session.ToolCalls != 1 || len(r.Messages) != 2 {
+		t.Fatal("structure page/feed lost fields")
+	}
+	m := r.Messages[1]
+	if m.Kind != "text" || m.Thinking == "" || m.Usage == nil || m.Usage.Input != 7 || len(m.Calls) != 1 || !m.Calls[0].Error || m.Calls[0].Agent != "claude:child" {
+		t.Fatal("structure fields lost")
+	}
+}

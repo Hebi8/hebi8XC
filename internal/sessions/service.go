@@ -59,6 +59,7 @@ type Service struct {
 	said      map[string]string // last message logged per subject
 	pulling   sync.Mutex        // one feed is read at a time
 	copying   map[string]*copyLock
+	formats   map[string]int
 }
 
 // copyLock makes the copies of one session take turns.
@@ -209,6 +210,7 @@ type changesPage struct {
 // Epoch and Rev say which feed, and which revision of the session in it,
 // the messages belong to. Epoch was added later and may be missing.
 type messagesPage struct {
+	Format   int       `json:"format,omitempty"`
 	Epoch    string    `json:"epoch"`
 	Rev      int64     `json:"rev"`
 	Messages []Message `json:"messages"`
@@ -293,7 +295,11 @@ func (s *Service) LocalMessages(ctx context.Context, key string, after int64, li
 	if msgs == nil {
 		msgs = []Message{}
 	}
-	return messagesPage{Epoch: epoch, Rev: rev, Messages: msgs, More: more}, nil
+	format := messageFormat(msgs)
+	for i := range msgs {
+		msgs[i] = clampMessage(msgs[i])
+	}
+	return messagesPage{Epoch: epoch, Rev: rev, Messages: msgs, More: more, Format: format}, nil
 }
 
 // maxPullPages bounds one Pull. A feed longer than that is continued in
@@ -388,6 +394,10 @@ type Entry struct {
 	Parent       string    `json:"parent,omitempty"`
 	Spawned      bool      `json:"spawned,omitempty"`
 	Archived     bool      `json:"archived,omitempty"`
+	App          string    `json:"app,omitempty"`
+	Reader       string    `json:"reader,omitempty"`
+	ToolCalls    *int64    `json:"tool_calls,omitempty"`
+	ToolErrors   *int64    `json:"tool_errors,omitempty"`
 }
 
 // Listing is the answer to h8c sessions.
@@ -527,6 +537,7 @@ func entry(sess Session, n *Node, nodes map[string]*Node) Entry {
 		ProjectPath: sess.ProjectPath, Branch: sess.Branch, Model: sess.Model,
 		CreatedAt: time.UnixMilli(sess.CreatedAt).UTC(), UpdatedAt: time.UnixMilli(sess.UpdatedAt).UTC(),
 		Messages: sess.Messages, Parent: sess.Parent, Spawned: sess.Spawned, Archived: sess.Archived,
+		App: sess.App, Reader: sess.Reader, ToolCalls: sess.ToolCalls, ToolErrors: sess.ToolErrors,
 	}
 }
 
@@ -550,6 +561,7 @@ func lessNode(a, b Node) bool {
 
 // Reading is a page of a session, with where it came from.
 type Reading struct {
+	Format   int       `json:"format,omitempty"`
 	Session  Entry     `json:"session"`
 	Messages []Message `json:"messages"`
 	// Next is the --after value of the next page, 0 on the last one.
@@ -638,11 +650,13 @@ func (s *Service) Read(ctx context.Context, node, key string, after int64, limit
 		if msgs, more, err = s.Source.Messages(ctx, key, after, limit, PageBudget); err != nil {
 			return Reading{}, err
 		}
+		out.Format = messageFormat(msgs)
 	} else {
 		cp, err := s.copyOf(ctx, n, key, rev, &out)
 		if err != nil {
 			return Reading{}, err
 		}
+		out.Format = cp.Format
 		if msgs, more, err = s.Store.CachedMessages(ctx, n.ID, key, cp, after, limit, PageBudget); err != nil {
 			return Reading{}, err
 		}
@@ -675,7 +689,11 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 	fresh := cached && have.Rev >= rev
 
 	why, code := "is offline", CodeOffline
-	if !fresh {
+	s.mu.Lock()
+	served, knownFormat := s.formats[n.ID]
+	s.mu.Unlock()
+	needsFormat := have.Format < 1 && (!knownFormat || served > have.Format)
+	if !fresh || needsFormat {
 		for _, p := range s.Peers() {
 			if p.ID != n.ID || !p.Online {
 				continue
@@ -687,6 +705,21 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 			if p.Addr == "" {
 				why, code = "cannot be reached from here", ""
 				break
+			}
+			if fresh && have.Format < 1 {
+				var probe messagesPage
+				path := "/v1/sessions/messages?key=" + url.QueryEscape(key) + "&after=0&limit=1"
+				err := s.Fetch(ctx, p, path, &probe)
+				if err == nil {
+					s.rememberFormat(p.ID, probe.Format)
+				}
+				if err == nil && probe.Format <= have.Format {
+					break
+				}
+				if err != nil {
+					why, code = "did not answer ("+err.Error()+")", ""
+					break
+				}
 			}
 			made, err := s.fetchCopy(ctx, p, key)
 			if err == nil {
@@ -742,6 +775,7 @@ func (s *Service) fetchCopy(ctx context.Context, p Peer, key string) (made Cache
 	}()
 
 	var rev, after int64
+	format := 0
 	size, complete := 0, false
 pages:
 	for n := 0; n < maxCopyPages; n++ {
@@ -762,7 +796,12 @@ pages:
 		}
 		if n == 0 {
 			rev = pg.Rev
+			format = pg.Format
+			s.rememberFormat(p.ID, format)
+		} else if pg.Rev != rev || pg.Format != format {
+			return Cached{}, errors.New("session changed while copying")
 		}
+
 		keep := pg.Messages[:0]
 		for _, m := range pg.Messages {
 			if m.ID <= after {
@@ -786,7 +825,7 @@ pages:
 			break
 		}
 	}
-	if err := s.Store.UseCopy(ctx, p.ID, key, feed.Epoch, gen, rev, complete); err != nil {
+	if err := s.Store.UseCopy(ctx, p.ID, key, feed.Epoch, gen, rev, complete, format); err != nil {
 		return Cached{}, err
 	}
 	made, _, err = s.Store.Cached(ctx, p.ID, key)
@@ -800,10 +839,60 @@ func clampMessage(m Message) Message {
 			m.Text, m.Truncated = string(r[:MaxText]), true
 		}
 	}
-	for _, f := range []*string{&m.Role, &m.Sidechain} {
+	for _, f := range []*string{&m.Role, &m.Sidechain, &m.Kind, &m.Model} {
 		if len(*f) > maxField {
 			*f = strings.ToValidUTF8((*f)[:maxField], "")
 		}
 	}
+	m.Thinking, _ = cutBytes(m.Thinking, 32<<10)
+	calls := append([]Call(nil), m.Calls...)
+	size := 2
+	for i := range calls {
+		c := &calls[i]
+		for _, f := range []*string{&c.Call, &c.Tool, &c.Agent} {
+			*f, _ = cutBytes(*f, maxField)
+		}
+		var clipped bool
+		c.Input, clipped = cutBytes(c.Input, 4<<10)
+		c.Truncated = c.Truncated || clipped
+		c.Output, clipped = cutBytes(c.Output, 4<<10)
+		c.Truncated = c.Truncated || clipped
+		raw, _ := json.Marshal(c)
+		size += len(raw) + 1
+		if size > 512<<10 {
+			m.CallsDropped += len(calls) - i
+			calls = calls[:i]
+			break
+		}
+	}
+	m.Calls = calls
 	return m
+}
+
+func cutBytes(text string, n int) (string, bool) {
+	if len(text) <= n {
+		return text, false
+	}
+	return strings.ToValidUTF8(text[:n], ""), true
+}
+
+func messageFormat(messages []Message) int {
+	if len(messages) == 0 {
+		return 0
+	}
+	for _, m := range messages {
+		if m.Kind == "" {
+			return 0
+		}
+	}
+	return 1
+}
+
+func (s *Service) rememberFormat(node string, format int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.formats == nil {
+		s.formats = map[string]int{}
+	}
+	s.formats[node] = format
 }

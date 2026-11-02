@@ -274,7 +274,32 @@ func showSession(dir string, args []string, out io.Writer) error {
 		if m.Time > 0 {
 			head += "  " + time.UnixMilli(m.Time).Local().Format(time.DateTime)
 		}
+		if m.Kind != "" {
+			head += " [" + m.Kind + "]"
+		}
 		fmt.Fprintf(out, "\n--- %s\n%s\n", head, m.Text)
+		for _, call := range m.Calls {
+			status := ""
+			if call.Error {
+				status = " [error]"
+			}
+			fmt.Fprintf(out, "  call %s: %s%s\n", call.Call, call.Tool, status)
+			if call.Agent != "" {
+				fmt.Fprintf(out, "    agent: %s\n", call.Agent)
+			}
+			if call.Input != "" {
+				fmt.Fprintf(out, "    input: %s\n", call.Input)
+			}
+			if call.Output != "" {
+				fmt.Fprintf(out, "    output: %s\n", call.Output)
+			}
+			if call.Truncated {
+				fmt.Fprintln(out, "    (call truncated)")
+			}
+		}
+		if m.CallsDropped > 0 {
+			fmt.Fprintf(out, "  (%d calls omitted)\n", m.CallsDropped)
+		}
 		if m.Truncated {
 			fmt.Fprintln(out, "[cut: the message is longer]")
 		}

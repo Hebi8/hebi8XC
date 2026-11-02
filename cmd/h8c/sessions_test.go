@@ -475,3 +475,26 @@ func TestUpCombinesACPAndWake(t *testing.T) {
 		t.Fatal(pg, err)
 	}
 }
+
+func TestShowStructuredJSON(t *testing.T) {
+	desk, laptop, d := twoMachines(t)
+	d.Structure("claude:a1", 2, sessions.Message{Thinking: "consider the edge", Calls: []sessions.Call{
+		{Call: "one", Tool: "shell", Input: "false", Output: "failed", Error: true},
+		{Call: "two", Tool: "spawn_agent", Agent: "child"},
+	}})
+	for _, dir := range []string{desk, laptop} {
+		var reading sessions.Reading
+		raw := h8c(t, dir, "show", "desk/claude:a1", "--json")
+		if err := json.Unmarshal([]byte(raw), &reading); err != nil {
+			t.Fatal(err)
+		}
+		m := reading.Messages[1]
+		if reading.Format != 1 || m.Kind != "text" || len(m.Calls) != 2 || !m.Calls[0].Error || m.Calls[1].Agent != "claude:child" {
+			t.Fatal("structured CLI JSON lost fields")
+		}
+		plain := h8c(t, dir, "show", "desk/claude:a1")
+		if !strings.Contains(plain, "[text]") || !strings.Contains(plain, "shell [error]") || !strings.Contains(plain, "claude:child") {
+			t.Fatal("CLI calls missing")
+		}
+	}
+}

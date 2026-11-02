@@ -50,7 +50,7 @@ func TestSessionsAreThoseOfThisMachine(t *testing.T) {
 	slices.SortFunc(list, func(a, b sessions.Session) int { return strings.Compare(a.Key, b.Key) })
 	a, b := list[0], list[1]
 	a.Stamp = ""
-	want := sessions.Session{Key: "claude:a1", Agent: "claude", Title: "Fix the parser", Project: "parser",
+	want := sessions.Session{Key: "claude:a1", Agent: "claude", Reader: "wake", Title: "Fix the parser", Project: "parser",
 		ProjectPath: "/home/alice/src/parser", Branch: "main", Model: "model-x",
 		CreatedAt: 1_699_999_999_000, UpdatedAt: 1_700_000_000_002, Messages: 2}
 	if a != want {

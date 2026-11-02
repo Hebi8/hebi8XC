@@ -27,6 +27,10 @@ type Session struct {
 	Parent      string `json:"parent,omitempty"`  // key of the session this one belongs under
 	Spawned     bool   `json:"spawned,omitempty"` // started by an agent, not by the user
 	Archived    bool   `json:"archived,omitempty"`
+	App         string `json:"app,omitempty"`
+	Reader      string `json:"reader,omitempty"`
+	ToolCalls   *int64 `json:"tool_calls,omitempty"`
+	ToolErrors  *int64 `json:"tool_errors,omitempty"`
 
 	// Stamp changes whenever the content of the session may have changed.
 	// It stays on the machine.
@@ -37,13 +41,37 @@ type Session struct {
 type Message struct {
 	// ID grows from one message of a session to the next. It is the cursor
 	// for reading a session in pages and has no other meaning.
-	ID        int64  `json:"id"`
-	Seq       int64  `json:"seq"`                 // number of the message as the agent's own tools show it
-	Sidechain string `json:"sidechain,omitempty"` // set for messages of a side thread, such as a subagent's
-	Role      string `json:"role"`
-	Time      int64  `json:"time,omitempty"` // Unix milliseconds, 0 if unknown
-	Text      string `json:"text"`
-	Truncated bool   `json:"truncated,omitempty"` // Text is only the beginning
+	ID           int64  `json:"id"`
+	Seq          int64  `json:"seq"`                 // number of the message as the agent's own tools show it
+	Sidechain    string `json:"sidechain,omitempty"` // set for messages of a side thread, such as a subagent's
+	Role         string `json:"role"`
+	Time         int64  `json:"time,omitempty"` // Unix milliseconds, 0 if unknown
+	Text         string `json:"text"`
+	Truncated    bool   `json:"truncated,omitempty"` // Text is only the beginning
+	Kind         string `json:"kind,omitempty"`
+	Thinking     string `json:"thinking,omitempty"`
+	Calls        []Call `json:"calls,omitempty"`
+	CallsDropped int    `json:"calls_dropped,omitempty"`
+	Usage        *Usage `json:"usage,omitempty"`
+	Model        string `json:"model,omitempty"`
+}
+
+// Call is a tool invocation, with its result nested in the message that made it.
+type Call struct {
+	Call      string `json:"call"`
+	Tool      string `json:"tool"`
+	Input     string `json:"input,omitempty"`
+	Output    string `json:"output,omitempty"`
+	Error     bool   `json:"error,omitempty"`
+	Agent     string `json:"agent,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+}
+
+type Usage struct {
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
 }
 
 // Source is the index of the sessions on this machine. Implementations read
@@ -54,8 +82,8 @@ type Source interface {
 	// Messages returns the messages of a session whose ID is above after,
 	// in order: at most limit of them, and no more than fit into budget
 	// bytes by MessageSize, but always one. It must stop reading there, not
-	// read on and discard. more says whether the session goes on. Text
-	// longer than MaxText characters is cut and marked.
+	// read on and discard. more says whether the session goes on. Sources
+	// with structure return full local text; LocalMessages applies wire limits.
 	Messages(ctx context.Context, key string, after int64, limit, budget int) (msgs []Message, more bool, err error)
 }
 

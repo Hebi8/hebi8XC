@@ -81,3 +81,24 @@ func (d *DB) Put(idx int64, role, text, modified, model string, ms int64) {
 	payload := Join(Int(1, uint64(typ)), Bytes(5, meta), Bytes(number, body))
 	d.Exec("INSERT OR REPLACE INTO steps VALUES (?, ?, 3, ?, ?)", idx, typ, meta, payload)
 }
+
+// Transcript writes fictional step records beside the conversation database.
+func (d *DB) Transcript(steps ...any) {
+	d.t.Helper()
+	path := filepath.Join(filepath.Dir(filepath.Dir(d.Path)), "brain", filepath.Base(d.Path[:len(d.Path)-3]), ".system_generated", "logs", "transcript.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		d.t.Fatal(err)
+	}
+	var data []byte
+	for _, step := range steps {
+		b, err := json.Marshal(step)
+		if err != nil {
+			d.t.Fatal(err)
+		}
+		data = append(data, b...)
+		data = append(data, '\n')
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		d.t.Fatal(err)
+	}
+}
