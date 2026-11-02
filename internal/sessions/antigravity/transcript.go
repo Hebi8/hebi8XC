@@ -36,14 +36,13 @@ func transcriptPath(path string) string {
 
 // The transcript carries no call ids on result steps. Within each planner
 // step its results follow the calls in order; a new planner/user step ends
-// that group. Message ids remain the database step indices.
-func transcript(path string) (map[int64]sessions.Message, bool, error) {
+// that group. Message ids remain the database step indices. Structure is
+// optional: a transcript that cannot be read leaves the database text, and
+// false says so.
+func transcript(path string) (map[int64]sessions.Message, bool) {
 	f, err := os.Open(transcriptPath(path))
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, false, nil
-	}
 	if err != nil {
-		return nil, false, err
+		return nil, false
 	}
 	defer f.Close()
 	out := map[int64]sessions.Message{}
@@ -53,13 +52,17 @@ func transcript(path string) (map[int64]sessions.Message, bool, error) {
 	for {
 		line, err := reader.ReadBytes('\n')
 		if err != nil && err != io.EOF {
-			return nil, false, err
+			return nil, false
 		}
 		if len(line) > 0 {
 			var step transcriptStep
-			if e := json.Unmarshal(line, &step); e != nil {
-				// Structure is optional; a damaged or unfinished line must
-				// not hide the database text or the other transcript steps.
+			e := json.Unmarshal(line, &step)
+			// A line that is not JSON says nothing, so it is skipped. A field
+			// of an unexpected type still leaves the line's type: that step is
+			// dropped, but it keeps its place, or the results after it would
+			// land on other calls.
+			var mistyped *json.UnmarshalTypeError
+			if e != nil && !errors.As(e, &mistyped) {
 				if err == io.EOF {
 					break
 				}
@@ -69,6 +72,10 @@ func transcript(path string) (map[int64]sessions.Message, bool, error) {
 			case "USER_INPUT":
 				host = -1
 			case "PLANNER_RESPONSE":
+				if e != nil {
+					host, next = -1, 0
+					break
+				}
 				m := sessions.Message{Kind: "text", Thinking: step.Thinking}
 				if step.Input != nil {
 					m.Usage = &sessions.Usage{Input: *step.Input, Output: step.Output, CacheRead: step.CacheRead}
@@ -85,6 +92,10 @@ func transcript(path string) (map[int64]sessions.Message, bool, error) {
 				host = step.Index
 				next = 0
 			case "VIEW_FILE", "RUN_COMMAND", "GREP_SEARCH", "LIST_DIRECTORY", "CODE_ACTION", "BROWSER_SUBAGENT", "SEARCH_WEB", "READ_URL_CONTENT", "ASK_QUESTION", "GENERIC", "ERROR_MESSAGE", "MCP_TOOL", "AGENCY_TOOL_CALL":
+				if e != nil {
+					next++
+					break
+				}
 				m := out[host]
 				if next < len(m.Calls) {
 					c := &m.Calls[next]
@@ -105,5 +116,5 @@ func transcript(path string) (map[int64]sessions.Message, bool, error) {
 			break
 		}
 	}
-	return out, true, nil
+	return out, true
 }

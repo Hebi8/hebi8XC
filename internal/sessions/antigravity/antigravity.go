@@ -207,10 +207,7 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 	}
 	defer db.Close()
 	defer tx.Rollback()
-	structure, hasTranscript, err := transcript(path)
-	if err != nil {
-		return s, err
-	}
+	structure, hasTranscript := transcript(path)
 	var size int64
 	err = tx.QueryRowContext(ctx, "SELECT length(data) FROM trajectory_metadata_blob WHERE id = 'main'").Scan(&size)
 	if err == nil {
@@ -318,10 +315,7 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 	}
 	defer db.Close()
 	defer tx.Rollback()
-	structure, hasTranscript, err := transcript(path)
-	if err != nil {
-		return nil, false, err
-	}
+	structure, hasTranscript := transcript(path)
 	limit = max(1, min(limit, sessions.MaxPage))
 	budget = min(budget, sessions.PageBudget)
 	rows, err := tx.QueryContext(ctx, `SELECT idx,step_type,coalesce(length(metadata),0),coalesce(length(step_payload),0)

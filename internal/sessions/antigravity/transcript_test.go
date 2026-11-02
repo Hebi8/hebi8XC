@@ -3,6 +3,7 @@ package antigravity
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,83 @@ func TestTranscriptCountsOnlyDatabaseSteps(t *testing.T) {
 	}
 	msgs, _, err := x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
 	if err != nil || len(msgs) != 1 || len(msgs[0].Calls) != 1 || !msgs[0].Calls[0].Error {
+		t.Fatalf("messages: %+v %v", msgs, err)
+	}
+}
+
+// appendTranscript adds raw lines, which d.Transcript would have encoded.
+func appendTranscript(t *testing.T, path, lines string) {
+	t.Helper()
+	f, err := os.OpenFile(transcriptPath(path), os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.WriteString(lines); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDamagedTranscriptStepKeepsItsPlace(t *testing.T) {
+	const (
+		twoCalls = `{"step_index":1,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"first","args":"a"},{"name":"second","args":"b"}]}` + "\n"
+		oneCall  = `{"step_index":1,"type":"PLANNER_RESPONSE","tool_calls":[{"name":"earlier","args":"a"}]}` + "\n"
+	)
+	for name, tc := range map[string]struct {
+		lines string
+		want  []sessions.Call
+	}{
+		"mistyped result": {
+			twoCalls + `{"step_index":2,"type":"RUN_COMMAND","exit_code":"1","content":"first output"}` + "\n" +
+				`{"step_index":3,"type":"RUN_COMMAND","content":"second output"}` + "\n",
+			[]sessions.Call{{Call: "step-1-0", Tool: "first", Input: "a"}, {Call: "step-1-1", Tool: "second", Input: "b", Output: "second output"}},
+		},
+		"mistyped planner": {
+			oneCall + `{"step_index":2,"type":"PLANNER_RESPONSE","content":{}}` + "\n" +
+				`{"step_index":3,"type":"RUN_COMMAND","status":"ERROR","content":"belongs to the lost step"}` + "\n",
+			[]sessions.Call{{Call: "step-1-0", Tool: "earlier", Input: "a"}},
+		},
+		"valid steps after a line that is not JSON": {
+			twoCalls + "{\"step_index\":2,\"type\":\n" + `{"step_index":3,"type":"RUN_COMMAND","content":"first output"}` + "\n",
+			[]sessions.Call{{Call: "step-1-0", Tool: "first", Input: "a", Output: "first output"}, {Call: "step-1-1", Tool: "second", Input: "b"}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "conversations")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			d := acptest.New(t, dir, "example")
+			d.Put(0, "user", "question", "", "", 1700000000000)
+			d.Put(1, "assistant", "answer", "", "", 1700000001000)
+			d.Transcript()
+			appendTranscript(t, d.Path, tc.lines)
+			msgs, _, err := Open(dir).Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
+			if err != nil || len(msgs) != 2 || !reflect.DeepEqual(msgs[1].Calls, tc.want) {
+				t.Fatalf("messages: %+v %v, want calls %+v", msgs, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestUnreadableTranscriptLeavesDatabaseText(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "conversations")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := acptest.New(t, dir, "example")
+	d.Put(0, "user", "question", "", "", 1700000000000)
+	// A directory opens and then fails to read, on every platform.
+	if err := os.MkdirAll(transcriptPath(d.Path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	x := Open(dir)
+	list, err := x.Sessions(ctx)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("sessions: %+v %v", list, err)
+	}
+	msgs, _, err := x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
+	if err != nil || len(msgs) != 1 || msgs[0].Text != "question" {
 		t.Fatalf("messages: %+v %v", msgs, err)
 	}
 }

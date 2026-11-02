@@ -3,6 +3,7 @@ package sessions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -229,6 +230,32 @@ func TestCopyToleratesRevisionAndFormatChange(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestCopyStopsWhenTheFeedChangesBetweenPages(t *testing.T) {
+	desk, laptop, net := pair(t)
+	desk.src.put("agent:one", "Example", 1000, "text")
+	net.sync()
+	epoch, err := desk.Store.Epoch()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	laptop.Fetch = func(_ context.Context, _ Peer, _ string, out any) error {
+		requests++
+		pg := out.(*messagesPage)
+		*pg = messagesPage{Epoch: epoch, Rev: 1, Format: 1, More: true, Messages: []Message{{ID: int64(requests), Text: "page"}}}
+		if requests == 2 {
+			pg.Epoch, pg.More = "another feed", false
+		}
+		return nil
+	}
+	if _, _, err := laptop.readAll("desk", "agent:one", 10); !errors.Is(err, ErrFeedChanged) || requests != 2 {
+		t.Fatalf("read across two feeds: %v (%d requests)", err, requests)
+	}
+	if _, ok, err := laptop.Store.Cached(ctx, desk.Self.ID, "agent:one"); err != nil || ok {
+		t.Fatalf("a copy was kept across two feeds: %v %v", ok, err)
 	}
 }
 
