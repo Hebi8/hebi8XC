@@ -33,9 +33,11 @@
           "input": "go test ./...",
           "output": "last token missing",
           "error": true,
-          "agent": "claude:child"
+          "agent": "claude:child",
+          "truncated": true
         }
-      ]
+      ],
+      "calls_dropped": 2
     }
   ],
   "more": false,

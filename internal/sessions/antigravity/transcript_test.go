@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"github.com/Hebi8/hebi8XC/internal/sessions/antigravity/acptest"
@@ -60,5 +61,89 @@ func TestTranscriptStructureKeepsDatabaseText(t *testing.T) {
 	msgs, _, err = x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
 	if err != nil || len(msgs) != 2 || msgs[1].Kind != "" || msgs[1].Usage != nil || len(msgs[1].Calls) != 0 {
 		t.Fatal("no transcript fallback", err)
+	}
+}
+
+func TestBadTranscriptLinesKeepSession(t *testing.T) {
+	for name, bad := range map[string]string{
+		"partial tail":     `{"step_index":2,"type":`,
+		"empty line":       "\n",
+		"string exit code": "{\"step_index\":2,\"type\":\"RUN_COMMAND\",\"exit_code\":\"1\"}\n",
+		"object content":   "{\"step_index\":2,\"type\":\"RUN_COMMAND\",\"content\":{}}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "conversations")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			d := acptest.New(t, dir, "example")
+			d.Put(0, "user", "database question", "", "", 1700000000000)
+			d.Put(1, "assistant", "database answer", "", "", 1700000001000)
+			d.Transcript(map[string]any{"step_index": 1, "type": "PLANNER_RESPONSE", "thinking": "valid structure"})
+			store, err := sessions.OpenStore(filepath.Join(t.TempDir(), "sessions.db"), func() time.Time { return time.Unix(1700000000, 0) })
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			x := Open(dir)
+			list, err := x.Sessions(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.SetLocal(ctx, "desk", list); err != nil {
+				t.Fatal(err)
+			}
+			f, err := os.OpenFile(transcriptPath(d.Path), os.O_APPEND|os.O_WRONLY, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString(bad); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+			// The cached reader and a fresh reader after restart must both retain it.
+			for _, reader := range []*Index{x, Open(dir)} {
+				list, err := reader.Sessions(ctx)
+				if err != nil || len(list) != 1 {
+					t.Fatalf("sessions: %v %v", list, err)
+				}
+				if _, err := store.SetLocal(ctx, "desk", list); err != nil {
+					t.Fatal(err)
+				}
+				_, _, ok, err := store.Lookup(ctx, "desk", "antigravity-acp:example")
+				if err != nil || !ok {
+					t.Fatal("session deleted after bad transcript", err)
+				}
+				msgs, more, err := reader.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
+				if err != nil || more || len(msgs) != 2 || msgs[0].Text != "database question" || msgs[1].Text != "database answer" || msgs[1].Thinking != "valid structure" {
+					t.Fatalf("messages: %+v %v %v", msgs, more, err)
+				}
+			}
+		})
+	}
+}
+
+func TestTranscriptCountsOnlyDatabaseSteps(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "conversations")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := acptest.New(t, dir, "example")
+	d.Put(0, "assistant", "database answer", "", "", 1700000000000)
+	d.Exec("INSERT INTO steps VALUES (2,21,3,X'',X'')")
+	call := []any{map[string]any{"name": "shell", "args": "false"}}
+	d.Transcript(
+		map[string]any{"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": call, "status": "ERROR"},
+		map[string]any{"step_index": 1, "type": "PLANNER_RESPONSE", "tool_calls": call, "status": "ERROR"},
+		map[string]any{"step_index": 2, "type": "PLANNER_RESPONSE", "tool_calls": call, "status": "ERROR"},
+	)
+	x := Open(dir)
+	list, err := x.Sessions(ctx)
+	if err != nil || len(list) != 1 || *list[0].ToolCalls != 1 || *list[0].ToolErrors != 1 {
+		t.Fatalf("counts: %+v %v", list, err)
+	}
+	msgs, _, err := x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
+	if err != nil || len(msgs) != 1 || len(msgs[0].Calls) != 1 || !msgs[0].Calls[0].Error {
+		t.Fatalf("messages: %+v %v", msgs, err)
 	}
 }

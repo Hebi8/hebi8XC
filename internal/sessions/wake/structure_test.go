@@ -65,6 +65,12 @@ func TestStructureAndFullText(t *testing.T) {
 			t.Fatal("stale rows not discarded", err)
 		}
 	}
+	if !strings.Contains(log.String(), "session=codex:example") {
+		t.Fatal("stale log does not identify the session", log.String())
+	}
+	if _, _, err := x.Messages(ctx, "codex:missing", 0, 10, sessions.PageBudget); err != nil {
+		t.Fatal(err)
+	}
 	if strings.Count(log.String(), "structure is stale") != 1 {
 		t.Fatal(log.String())
 	}

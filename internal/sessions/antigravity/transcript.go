@@ -58,7 +58,12 @@ func transcript(path string) (map[int64]sessions.Message, bool, error) {
 		if len(line) > 0 {
 			var step transcriptStep
 			if e := json.Unmarshal(line, &step); e != nil {
-				return nil, false, e
+				// Structure is optional; a damaged or unfinished line must
+				// not hide the database text or the other transcript steps.
+				if err == io.EOF {
+					break
+				}
+				continue
 			}
 			switch step.Type {
 			case "USER_INPUT":

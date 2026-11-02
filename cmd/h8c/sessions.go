@@ -73,6 +73,7 @@ func openSessions(dir string, o upOptions, ident *identity.Identity, log *slog.L
 	// fails. One that is built later, by Wake or by hand, is picked up
 	// without a restart; until then the module says that there is none.
 	index := wake.Open(db)
+	index.Log = log
 	combined.Wake = index
 	return svc, func() { index.Close(); store.Close() }, nil
 }

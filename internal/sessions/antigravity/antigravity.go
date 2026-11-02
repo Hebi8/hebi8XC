@@ -224,6 +224,7 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 		return s, err
 	}
 	defer rows.Close()
+	var calls, errs int64
 	titled := false
 	for rows.Next() {
 		var idx, ms, ps int64
@@ -259,6 +260,12 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 			}
 		}
 		if typ == 14 || typ == 15 {
+			for _, c := range structure[idx].Calls {
+				calls++
+				if c.Error {
+					errs++
+				}
+			}
 			text, _, err := messageText(blob(ctx, tx, "steps", "step_payload", idx, ps), typ)
 			if err != nil {
 				return s, err
@@ -279,15 +286,6 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 		return s, err
 	}
 	if hasTranscript {
-		var calls, errs int64
-		for _, m := range structure {
-			for _, c := range m.Calls {
-				calls++
-				if c.Error {
-					errs++
-				}
-			}
-		}
 		s.ToolCalls = &calls
 		s.ToolErrors = &errs
 	}

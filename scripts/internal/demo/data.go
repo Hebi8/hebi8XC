@@ -125,6 +125,12 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 	attic.Put(waketest.Session{Key: d.Unread, Agent: "opencode", Title: "整理报销流程的自动化脚本",
 		Project: "家庭财务与报销流程自动化工具集", Path: "/home/alice/src/家庭财务与报销流程自动化工具集",
 		UpdatedAt: ms - 18*24*60*minute}, talk(true, 4, ms-18*24*60*minute)...)
+	for _, db := range []*waketest.DB{desk, laptop, attic} {
+		db.Exec(waketest.StructureSchema)
+		db.Exec(`INSERT OR REPLACE INTO structure_sessions
+ SELECT key,file_mtime,file_size,(SELECT value FROM schema_meta WHERE key='fts_format'),
+ (SELECT count(*) FROM messages WHERE session_key=s.key),'1' FROM sessions s`)
+	}
 	return d
 }
 

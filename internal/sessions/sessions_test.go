@@ -423,6 +423,11 @@ func TestFeedIsReadInPagesWithoutGapsOrRepeats(t *testing.T) {
 func TestUpdatedSessionReachesThePeerAndReplacesItsCopy(t *testing.T) {
 	desk, laptop, net := pair(t)
 	desk.src.put("claude:a", "Fix the parser", 1000, "one", "two")
+	// These copy-lifecycle checks use current-format messages; legacy
+	// format probing is covered separately in structure_test.go.
+	for i := range desk.src.messages["claude:a"] {
+		desk.src.messages["claude:a"][i].Kind = "text"
+	}
 	net.sync()
 
 	texts, r, err := laptop.readAll("desk", "claude:a", 10)
@@ -949,6 +954,11 @@ func (m *machine) cachedRows() int {
 func TestConcurrentReadersShareOneCopy(t *testing.T) {
 	desk, laptop, net := pair(t)
 	desk.src.put("claude:a", "A", 1000, "one", "two", "three")
+	// These copy-lifecycle checks use current-format messages; legacy
+	// format probing is covered separately in structure_test.go.
+	for i := range desk.src.messages["claude:a"] {
+		desk.src.messages["claude:a"][i].Kind = "text"
+	}
 	net.sync()
 
 	firstAsked, letFirst := make(chan struct{}), make(chan struct{})
@@ -1125,6 +1135,11 @@ func TestCopyStopsAtTheSizeLimit(t *testing.T) {
 	desk, laptop, net := pair(t)
 	empty := make([]string, 100) // messages without text still take room
 	desk.src.put("claude:a", "A", 1000, empty...)
+	// These copy-lifecycle checks use current-format messages; legacy
+	// format probing is covered separately in structure_test.go.
+	for i := range desk.src.messages["claude:a"] {
+		desk.src.messages["claude:a"][i].Kind = "text"
+	}
 	net.sync()
 	limits(t, 2000, maxCopyPages)
 

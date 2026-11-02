@@ -7,10 +7,9 @@ import (
 
 // Both the stamp and the rows are compared: a stock writer can reparse a
 // source without changing its size or modification time.
-const structureJoin = ` LEFT JOIN structure_sessions st ON st.session_key=s.key
- LEFT JOIN (SELECT session_key,count(*) n FROM messages GROUP BY session_key) mr ON mr.session_key=s.key `
+const structureJoin = ` LEFT JOIN structure_sessions st ON st.session_key=s.key `
 const validStructure = `coalesce(st.format='1' AND st.file_mtime=s.file_mtime AND st.file_size=s.file_size
- AND st.fts_format=(SELECT value FROM schema_meta WHERE key='fts_format') AND st.rows=coalesce(mr.n,0),0)`
+ AND st.fts_format=(SELECT value FROM schema_meta WHERE key='fts_format') AND st.rows=(SELECT count(*) FROM messages m WHERE m.session_key=s.key),0)`
 
 var structureColumns = map[string][]string{
 	"schema_meta":        {"key", "value"},
@@ -24,7 +23,11 @@ func (x *Index) note(key, message string) {
 	defer x.mu.Unlock()
 	if !x.said[key] {
 		x.said[key] = true
-		x.Log.Info(message)
+		if key != "" {
+			x.Log.Info(message, "session", key)
+		} else {
+			x.Log.Info(message)
+		}
 	}
 }
 

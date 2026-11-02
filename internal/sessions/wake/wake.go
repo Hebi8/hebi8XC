@@ -269,7 +269,7 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, false, err
 		}
-		if !valid {
+		if err == nil && !valid {
 			x.note(key, "Wake session structure is stale; showing text only")
 		}
 	}

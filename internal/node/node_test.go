@@ -112,6 +112,7 @@ func (tn *testNode) boot(listen string) {
 		}
 		t.Cleanup(func() { store.Close() })
 		index := wake.Open(tn.wake.Path)
+		index.Log = tn.logger()
 		t.Cleanup(index.Close)
 		tn.sessions = &sessions.Service{
 			Self:   sessions.Peer{ID: tn.id.ID, Name: tn.id.Name},

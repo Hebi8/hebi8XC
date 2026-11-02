@@ -223,7 +223,8 @@ func (s *Store) SetLocal(ctx context.Context, self string, current []Session) (c
 		changed++
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET rev = ?, deleted = 1, print = '', title = '', project = '', project_path = '',
-			       branch = '', model = '', parent = '', messages = 0
+			       branch = '', model = '', parent = '', messages = 0,
+			       app = '', reader = '', tool_calls = NULL, tool_errors = NULL
 			WHERE node = ? AND key = ?`, rev, self, key); err != nil {
 			return 0, err
 		}
@@ -702,6 +703,7 @@ func (s *Store) migrateStructure() error {
  ALTER TABLE messages ADD COLUMN model TEXT NOT NULL DEFAULT '';
  ALTER TABLE messages ADD COLUMN calls_dropped INTEGER NOT NULL DEFAULT 0;
  UPDATE sessions SET print='';
+ UPDATE nodes SET cursor=0;
  INSERT INTO meta(k,v) VALUES ('schema','1');`)
 	if err != nil {
 		return err

@@ -179,7 +179,11 @@ func TestThisBuildUnderstandsProtocol1Answers(t *testing.T) {
 		if second.ID != 2 || second.Sidechain != "sc-1" || second.Role != "assistant" || !second.Truncated || second.Time != 0 {
 			t.Errorf("%s: second message = %+v", messages, second)
 		}
-		// Reading again uses the copy: the old node is not asked a second time.
+		// A format-0 copy is probed once per session revision. Later reads
+		// use the same copy without asking the old node again.
+		if err := laptop.control("/v1/sessions/messages?node=desk&key=claude:0f3a9c", &r); err != nil {
+			t.Fatal(err)
+		}
 		asked := old.requests("/v1/sessions/messages")
 		if err := laptop.control("/v1/sessions/messages?node=desk&key=claude:0f3a9c", &r); err != nil || r.From != "cache" ||
 			old.requests("/v1/sessions/messages") != asked {
@@ -390,7 +394,62 @@ func TestStructuredProtocol1Answers(t *testing.T) {
 		t.Fatal("structure page/feed lost fields")
 	}
 	m := r.Messages[1]
-	if m.Kind != "text" || m.Thinking == "" || m.Usage == nil || m.Usage.Input != 7 || len(m.Calls) != 1 || !m.Calls[0].Error || m.Calls[0].Agent != "claude:child" {
+	if m.Kind != "text" || m.Thinking == "" || m.Usage == nil || m.Usage.Input != 7 || len(m.Calls) != 1 || !m.Calls[0].Error || m.Calls[0].Agent != "claude:child" || !m.Calls[0].Truncated || m.CallsDropped != 2 {
 		t.Fatal("structure fields lost")
 	}
+
+	// This build must also produce every field, not merely accept the samples.
+	desk := sessionNode(t, c, "desk")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	var feed struct {
+		Changes []sessions.Change `json:"changes"`
+	}
+	var page struct {
+		Messages []sessions.Message `json:"messages"`
+	}
+	if err := json.Unmarshal(read("sessions.response.json"), &feed); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(read("messages.response.json"), &page); err != nil {
+		t.Fatal(err)
+	}
+	source := &structuredProtocolSource{messages: page.Messages}
+	for _, change := range feed.Changes {
+		source.list = append(source.list, change.Session)
+	}
+	desk.sessions.Source = source
+	desk.sessions.SyncLocal(context.Background())
+	source.list = source.list[:1]
+	desk.sessions.SyncLocal(context.Background())
+	feedPath, messagesPath := sampleRequests(t)
+	for _, test := range []struct{ path, name string }{{feedPath, "sessions.response.json"}, {messagesPath, "messages.response.json"}} {
+		var got json.RawMessage
+		if _, err := laptop.client.Get(context.Background(), desk.addr, test.path, &got, sessions.MaxReply); err != nil {
+			t.Fatal(err)
+		}
+		var have, want any
+		if err := json.Unmarshal(got, &have); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(read(test.name), &want); err != nil {
+			t.Fatal(err)
+		}
+		for _, problem := range holds(have, want, test.name, map[string]bool{"epoch": true}) {
+			t.Error(problem)
+		}
+	}
+}
+
+// A fixed source supplies the sample's optional fields through the live handlers.
+type structuredProtocolSource struct {
+	list     []sessions.Session
+	messages []sessions.Message
+}
+
+func (s *structuredProtocolSource) Sessions(context.Context) ([]sessions.Session, error) {
+	return s.list, nil
+}
+func (s *structuredProtocolSource) Messages(context.Context, string, int64, int, int) ([]sessions.Message, bool, error) {
+	return s.messages, false, nil
 }

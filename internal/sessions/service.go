@@ -59,7 +59,7 @@ type Service struct {
 	said      map[string]string // last message logged per subject
 	pulling   sync.Mutex        // one feed is read at a time
 	copying   map[string]*copyLock
-	formats   map[string]int
+	probed    map[[2]string]int64 // session revision last probed without newer structure
 }
 
 // copyLock makes the copies of one session take turns.
@@ -690,9 +690,9 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 
 	why, code := "is offline", CodeOffline
 	s.mu.Lock()
-	served, knownFormat := s.formats[n.ID]
+	probedRev, probed := s.probed[[2]string{n.ID, key}]
 	s.mu.Unlock()
-	needsFormat := have.Format < 1 && (!knownFormat || served > have.Format)
+	needsFormat := have.Format < 1 && (!probed || probedRev != rev)
 	if !fresh || needsFormat {
 		for _, p := range s.Peers() {
 			if p.ID != n.ID || !p.Online {
@@ -710,10 +710,13 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 				var probe messagesPage
 				path := "/v1/sessions/messages?key=" + url.QueryEscape(key) + "&after=0&limit=1"
 				err := s.Fetch(ctx, p, path, &probe)
-				if err == nil {
-					s.rememberFormat(p.ID, probe.Format)
-				}
 				if err == nil && probe.Format <= have.Format {
+					s.mu.Lock()
+					if s.probed == nil {
+						s.probed = map[[2]string]int64{}
+					}
+					s.probed[[2]string{p.ID, key}] = rev
+					s.mu.Unlock()
 					break
 				}
 				if err != nil {
@@ -797,9 +800,10 @@ pages:
 		if n == 0 {
 			rev = pg.Rev
 			format = pg.Format
-			s.rememberFormat(p.ID, format)
-		} else if pg.Rev != rev || pg.Format != format {
-			return Cached{}, errors.New("session changed while copying")
+		} else {
+			// A growing session can change between pages. Keep the first
+			// revision and the lowest format so a later read can refresh it.
+			format = min(format, pg.Format)
 		}
 
 		keep := pg.Messages[:0]
@@ -828,6 +832,9 @@ pages:
 	if err := s.Store.UseCopy(ctx, p.ID, key, feed.Epoch, gen, rev, complete, format); err != nil {
 		return Cached{}, err
 	}
+	s.mu.Lock()
+	delete(s.probed, [2]string{p.ID, key})
+	s.mu.Unlock()
 	made, _, err = s.Store.Cached(ctx, p.ID, key)
 	return made, err
 }
@@ -886,13 +893,4 @@ func messageFormat(messages []Message) int {
 		}
 	}
 	return 1
-}
-
-func (s *Service) rememberFormat(node string, format int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.formats == nil {
-		s.formats = map[string]int{}
-	}
-	s.formats[node] = format
 }
