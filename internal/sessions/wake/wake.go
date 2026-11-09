@@ -246,7 +246,7 @@ func (x *Index) Sessions(ctx context.Context) (result []sessions.Session, err er
 			s.ToolCalls = &calls
 			s.ToolErrors = &errs
 			if structured == "2" {
-				s.AddUsage(usage(input, output, cacheRead, cacheWrite))
+				s.Tokens = tokens(input, output, cacheRead, cacheWrite)
 				if err := sessionFiles(ctx, tx, &s); err != nil {
 					return nil, err
 				}

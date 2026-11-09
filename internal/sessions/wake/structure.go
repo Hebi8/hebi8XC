@@ -100,21 +100,20 @@ func usage(input, output, cacheRead, cacheWrite sql.NullInt64) *sessions.Usage {
 }
 
 func sessionFiles(ctx context.Context, tx *sql.Tx, s *sessions.Session) error {
-	rows, err := tx.QueryContext(ctx, `SELECT f.path,f.op,c.is_error
+	rows, err := tx.QueryContext(ctx, `SELECT f.path,f.op
  FROM tool_files f JOIN tool_calls c ON c.session_key=f.session_key AND c.seq=f.seq AND c.idx=f.idx
  JOIN messages m ON m.session_key=f.session_key AND m.seq=f.seq
- WHERE f.session_key=? ORDER BY f.seq,f.idx,f.path,f.op`, s.Key)
+ WHERE f.session_key=? AND c.is_error=0 AND f.op IN ('change','delete') ORDER BY f.seq,f.idx,f.path,f.op`, s.Key)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var f sessions.File
-		var failed bool
-		if err := rows.Scan(&f.Path, &f.Op, &failed); err != nil {
+		if err := rows.Scan(&f.Path, &f.Op); err != nil {
 			return err
 		}
-		s.AddFiles([]sessions.File{f}, !failed)
+		s.AddFiles([]sessions.File{f}, true)
 		if len(s.Files) == sessions.MaxSessionFiles {
 			break
 		}
@@ -137,4 +136,17 @@ func callFiles(ctx context.Context, tx *sql.Tx, key string, seq, idx int64) ([]s
 		files = append(files, f)
 	}
 	return files, rows.Err()
+}
+
+func tokens(input, output, cacheRead, cacheWrite sql.NullInt64) *sessions.Tokens {
+	if !input.Valid && !output.Valid && !cacheRead.Valid && !cacheWrite.Valid {
+		return nil
+	}
+	known := func(n sql.NullInt64) *int64 {
+		if !n.Valid {
+			return nil
+		}
+		return &n.Int64
+	}
+	return &sessions.Tokens{Input: known(input), Output: known(output), CacheRead: known(cacheRead), CacheWrite: known(cacheWrite)}
 }

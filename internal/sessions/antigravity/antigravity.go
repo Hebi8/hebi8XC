@@ -257,7 +257,7 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 			}
 		}
 		if typ == 14 || typ == 15 {
-			s.AddUsage(structure[idx].Usage)
+			s.AddTokens(structure[idx].tokens)
 			for _, c := range structure[idx].Calls {
 				s.AddFiles(c.Files, !c.Error)
 				calls++
@@ -350,7 +350,7 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 		if len(out) == limit {
 			return out, true, nil
 		}
-		m := structure[idx]
+		m := structure[idx].Message
 		m.ID, m.Seq, m.Role = idx+1, idx, role
 		if hasTranscript {
 			m.Kind = "text"

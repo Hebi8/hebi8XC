@@ -310,7 +310,7 @@ func TestTranscriptSessionTokensAndFiles(t *testing.T) {
 		t.Fatalf("sessions: %+v %v", list, err)
 	}
 	s := list[0]
-	if s.Tokens == nil || s.Tokens.Total != nil || *s.Tokens.Input != 18 || *s.Tokens.Output != 7 || *s.Tokens.CacheRead != 7 || *s.Tokens.CacheWrite != 0 {
+	if s.Tokens == nil || s.Tokens.Total != nil || *s.Tokens.Input != 18 || *s.Tokens.Output != 7 || *s.Tokens.CacheRead != 7 || s.Tokens.CacheWrite != nil {
 		t.Fatalf("tokens: %+v", s.Tokens)
 	}
 	if !reflect.DeepEqual(s.Files, []string{filepath.Join(cwd, "a.go"), filepath.Join(cwd, "pending.go"), filepath.Join(cwd, "b.go")}) {
@@ -366,5 +366,29 @@ func TestRelativeFileWithoutCWD(t *testing.T) {
 		if !reflect.DeepEqual(got, []sessions.File{{Path: "../main.go", Op: "change"}}) {
 			t.Fatalf("files: %+v", got)
 		}
+	}
+}
+
+func TestTranscriptDoubleEncodedFileArguments(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "conversations")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := acptest.New(t, dir, "example")
+	cwd := filepath.Join(t.TempDir(), "project")
+	d.CWD(cwd)
+	d.Put(0, "assistant", "edited", "", "", 1000)
+	d.Transcript(map[string]any{"step_index": 0, "type": "PLANNER_RESPONSE", "tool_calls": []any{
+		map[string]any{"name": "write_to_file", "args": map[string]any{"TargetFile": `"/home/alice/src/a.go"`}},
+		map[string]any{"name": "client_edit_file", "args": map[string]any{"target_file": `"b.go"`}},
+	}})
+	x := Open(dir)
+	list, err := x.Sessions(ctx)
+	if err != nil || len(list) != 1 || !reflect.DeepEqual(list[0].Files, []string{"/home/alice/src/a.go", filepath.Join(cwd, "b.go")}) {
+		t.Fatalf("file paths: %+v %v", list, err)
+	}
+	msgs, _, err := x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
+	if err != nil || msgs[0].Calls[0].Files[0].Path != "/home/alice/src/a.go" {
+		t.Fatal("quoted call path", err)
 	}
 }

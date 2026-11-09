@@ -94,19 +94,22 @@ type Usage struct {
 	CacheWrite int64 `json:"cache_write"`
 }
 
-// AddUsage sums known message usage, replacing a source-only total if present.
-func (s *Session) AddUsage(u *Usage) {
+// AddTokens sums each known category independently.
+func (s *Session) AddTokens(u *Tokens) {
 	if u == nil {
 		return
 	}
-	if s.Tokens == nil || s.Tokens.Total != nil {
+	if s.Tokens == nil {
 		s.Tokens = &Tokens{}
 	}
-	add := func(dst **int64, n int64) {
+	add := func(dst **int64, n *int64) {
+		if n == nil {
+			return
+		}
 		if *dst == nil {
 			*dst = new(int64)
 		}
-		**dst += n
+		**dst += *n
 	}
 	add(&s.Tokens.Input, u.Input)
 	add(&s.Tokens.Output, u.Output)

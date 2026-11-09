@@ -23,11 +23,12 @@ type transcriptStep struct {
 		Name string          `json:"name"`
 		Args json.RawMessage `json:"args"`
 	} `json:"tool_calls"`
-	Input     *int64          `json:"input_tokens"`
-	Output    int64           `json:"output_tokens"`
-	CacheRead int64           `json:"cache_read_tokens"`
-	ExitCode  int             `json:"exit_code"`
-	Error     json.RawMessage `json:"error"`
+	Input      *int64          `json:"input_tokens"`
+	Output     *int64          `json:"output_tokens"`
+	CacheRead  *int64          `json:"cache_read_tokens"`
+	CacheWrite *int64          `json:"cache_write_tokens"`
+	ExitCode   int             `json:"exit_code"`
+	Error      json.RawMessage `json:"error"`
 }
 
 func transcriptPath(path string) string {
@@ -39,13 +40,18 @@ func transcriptPath(path string) string {
 // that group. Message ids remain the database step indices. Structure is
 // optional: a transcript that cannot be read leaves the database text, and
 // false says so.
-func transcript(path string) (map[int64]sessions.Message, bool) {
+type transcriptMessage struct {
+	sessions.Message
+	tokens *sessions.Tokens
+}
+
+func transcript(path string) (map[int64]transcriptMessage, bool) {
 	f, err := os.Open(transcriptPath(path))
 	if err != nil {
 		return nil, false
 	}
 	defer f.Close()
-	out := map[int64]sessions.Message{}
+	out := map[int64]transcriptMessage{}
 	cwd := projectPath(path)
 	reader := bufio.NewReader(f)
 	var host int64
@@ -77,9 +83,19 @@ func transcript(path string) (map[int64]sessions.Message, bool) {
 					host, next = -1, 0
 					break
 				}
-				m := sessions.Message{Kind: "text", Thinking: step.Thinking}
+				m := transcriptMessage{Message: sessions.Message{Kind: "text", Thinking: step.Thinking}}
 				if step.Input != nil {
-					m.Usage = &sessions.Usage{Input: *step.Input, Output: step.Output, CacheRead: step.CacheRead}
+					m.tokens = &sessions.Tokens{Input: step.Input, Output: step.Output, CacheRead: step.CacheRead, CacheWrite: step.CacheWrite}
+					m.Usage = &sessions.Usage{Input: *step.Input}
+					if step.Output != nil {
+						m.Usage.Output = *step.Output
+					}
+					if step.CacheRead != nil {
+						m.Usage.CacheRead = *step.CacheRead
+					}
+					if step.CacheWrite != nil {
+						m.Usage.CacheWrite = *step.CacheWrite
+					}
 				}
 				for i, c := range step.Calls {
 					input := string(c.Args)
@@ -145,6 +161,10 @@ func toolFiles(tool, input, cwd string) []sessions.File {
 		var path string
 		if json.Unmarshal(args[field], &path) != nil || strings.TrimSpace(path) == "" {
 			continue
+		}
+		var decoded string
+		if json.Unmarshal([]byte(path), &decoded) == nil {
+			path = decoded
 		}
 		if !filepath.IsAbs(path) && filepath.IsAbs(cwd) {
 			path = filepath.Join(cwd, path)

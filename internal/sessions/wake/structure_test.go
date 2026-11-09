@@ -159,7 +159,7 @@ func TestUsageTotalsAndNulls(t *testing.T) {
 						t.Fatalf("known zero: %s", raw)
 					}
 				case s.Key == "agent:partial" && format == "2":
-					if s.Tokens == nil || *s.Tokens.Output != 6 {
+					if s.Tokens == nil || *s.Tokens.Output != 6 || s.Tokens.Input != nil || s.Tokens.CacheRead != nil || s.Tokens.CacheWrite != nil {
 						t.Fatalf("partial: %s", raw)
 					}
 				default:
