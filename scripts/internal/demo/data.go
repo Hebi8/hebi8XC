@@ -11,14 +11,24 @@ import (
 
 // Data says what the demo holds, for whoever shows or checks it. All of it
 // is made up.
+//
+// Desk and laptop have Wake indexes with structure: calls, their files and
+// thinking. Attic has an older index of text only, so the copy kept of it is
+// text only too, and a search over it is marked as incomplete.
 type Data struct {
 	Names    [3]string // desk, laptop, attic
 	IDs      [3]string // their node ids
 	Sessions [3]int    // how many sessions each machine has
-	Long     string    // on laptop: a session of many pages
-	Code     string    // on desk: code blocks, long lines, a folded message
+	Long     string    // on laptop: a session of many pages; some of its answers make calls
+	Code     string    // on desk: code blocks, long lines, a folded message, calls with files, thinking
+	Review   string    // on laptop: reads the file that Code changed, and changes its test
 	Kept     string    // on attic: read while it was online, so a copy is kept
 	Unread   string    // on attic: never read, so it cannot be shown; its project has a long name
+
+	Term   string // a word found on all three machines: live on desk and laptop, in the copy of attic
+	File   string // the file Code changed and Review only read
+	Anchor string // a phrase found in the input of one call of Long, far from its start
+	Broad  string // a word found in more places than one answer holds
 }
 
 type project struct{ name, path, branch string }
@@ -49,7 +59,7 @@ var (
 
 // fill puts the demo's sessions into the three indexes.
 func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
-	d := Data{Sessions: [3]int{59, 44, 12}}
+	d := Data{Sessions: [3]int{59, 45, 12}, Term: "rows", File: "importer/rows.go", Anchor: "--batch 100", Broad: "batch"}
 	ms := now.UnixMilli()
 	const minute = 60_000
 	n := 0 // counts all sessions, so that no two look the same
@@ -75,7 +85,7 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 	// last used weeks ago.
 	recent := func(i int) int64 { return int64(i*i*7 + i*13 + 5) }
 	ordinary(desk, "desk", d.Sessions[0]-2, recent)
-	ordinary(laptop, "laptop", d.Sessions[1]-1, func(i int) int64 { return recent(i) + 9 })
+	ordinary(laptop, "laptop", d.Sessions[1]-2, func(i int) int64 { return recent(i) + 9 })
 	ordinary(attic, "attic", d.Sessions[2]-2, func(i int) int64 { return int64(20+i*2) * 24 * 60 })
 
 	d.Long = "claude:long-migration"
@@ -92,6 +102,54 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 	}
 	laptop.Put(waketest.Session{Key: d.Long, Agent: "claude", Title: "Migrate the ledger to the new schema, batch by batch",
 		Project: "记账本", Path: "/home/alice/src/ledger", Branch: "migration", Model: "opus", UpdatedAt: ms - 3*minute}, long...)
+	// Every 25th batch the answer shows the calls that moved it. The answer
+	// to batch b is message 2b.
+	migrate := func(b int, output string) sessions.Call {
+		return sessions.Call{Call: fmt.Sprintf("migrate-%d", b), Tool: "shell",
+			Input: fmt.Sprintf("go run ./cmd/migrate --batch %d", b), Output: output}
+	}
+	laptop.Structure(d.Long, 50, sessions.Message{Calls: []sessions.Call{migrate(25, "moved 40 accounts in 1.8s")}})
+	laptop.Structure(d.Long, 100, sessions.Message{Calls: []sessions.Call{
+		{Call: "edit-schema", Tool: "edit_file", Input: `{"path":"migrations/0042_accounts.sql","old":"balance NUMERIC(12,2)","new":"balance NUMERIC(14,2)"}`,
+			Output: "updated 1 line", Files: []sessions.File{{Path: "/home/alice/src/ledger/migrations/0042_accounts.sql", Op: "change"}}},
+		migrate(50, "moved 40 accounts in 1.7s"),
+	}})
+	failed := migrate(75, "ERROR: deadlock detected while moving account 3011\nHINT: another transaction holds a lock on accounts")
+	failed.Error = true
+	retried := migrate(75, "moved 40 accounts in 2.4s (1 retry)")
+	retried.Call, retried.Input = "migrate-75-retry", retried.Input+" --retry"
+	laptop.Structure(d.Long, 150, sessions.Message{
+		Thinking: "The deadlock came from the nightly report, which reads the same rows. One retry is enough; no need to stop the report.",
+		Calls:    []sessions.Call{failed, retried}})
+	laptop.Structure(d.Long, 200, sessions.Message{Calls: []sessions.Call{
+		migrate(100, "moved 40 accounts in 1.9s"),
+		{Call: "read-balances", Tool: "read_file", Input: `{"path":"reports/balances.csv"}`,
+			Output: "account,old,new\n3001,120.00,120.00\n3002,75.50,75.50\n3003,0.00,0.00",
+			Files:  []sessions.File{{Path: "/home/alice/src/ledger/reports/balances.csv", Op: "read"}}},
+	}})
+	laptop.Structure(d.Long, 250, sessions.Message{Calls: []sessions.Call{migrate(125, "moved 40 accounts in 1.8s")}})
+
+	// The fix of Code, looked at again on another machine.
+	d.Review = "claude:importer-review"
+	laptop.Put(waketest.Session{Key: d.Review, Agent: "claude", Title: "Review the fix for the importer's last row",
+		Project: "atlas", Path: "/home/alice/src/atlas", Branch: "fix/last-row", Model: "opus", UpdatedAt: ms - 20*minute},
+		waketest.Message{Role: "user", Time: ms - 26*minute,
+			Text: "Review the change to importer/rows.go from desk. Are the rows at the end of a file imported now?"},
+		waketest.Message{Role: "assistant", Time: ms - 25*minute,
+			Text: "Yes. The loop now runs over all rows, and the importer tests pass on this machine as well."},
+		waketest.Message{Role: "user", Time: ms - 22*minute, Text: "Add a case for a file that does not end with a newline."},
+		waketest.Message{Role: "assistant", Time: ms - 21*minute, Text: "Added to the table of cases in the test; it passes."})
+	laptop.Structure(d.Review, 2, sessions.Message{
+		Thinking: "The new bound is len(rows). An empty file must not reach rows[len(rows)-1]; check that case too.",
+		Calls: []sessions.Call{
+			{Call: "read-rows", Tool: "read_file", Input: `{"path":"importer/rows.go"}`, Output: "for i := 0; i < len(rows); i++ {",
+				Files: []sessions.File{{Path: "/home/alice/src/atlas/importer/rows.go", Op: "read"}}},
+			{Call: "test-rows", Tool: "shell", Input: "go test ./importer -run TestRows -count=1", Output: "ok  \texample.com/atlas/importer\t0.388s"},
+		}})
+	laptop.Structure(d.Review, 4, sessions.Message{Calls: []sessions.Call{
+		{Call: "edit-test", Tool: "edit_file", Input: `{"path":"importer/rows_test.go","old":"{\"trailing row\", 3},","new":"{\"trailing row\", 3},\n\t{\"no final newline\", 3},"}`,
+			Output: "updated 1 line", Files: []sessions.File{{Path: "/home/alice/src/atlas/importer/rows_test.go", Op: "change"}}},
+	}})
 
 	d.Code = "codex:code-and-long-lines"
 	desk.Put(waketest.Session{Key: d.Code, Agent: "codex", Title: "导入器丢最后一行：代码块、长行和很长的输出",
@@ -107,9 +165,22 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 		waketest.Message{Role: "assistant", Time: ms - 36*minute,
 			Text: "Both wrap. A block that is opened and never closed stays text:\n\n```sh\ngo vet ./... && go test -race ./..."})
 
-	desk.Structure(d.Code, 2, sessions.Message{Thinking: "Check the last row before changing the loop.", Calls: []sessions.Call{
-		{Call: "read-rows", Tool: "read_file", Input: `{"path":"importer/rows.go"}`, Output: "for i := 0; i < len(rows)-1; i++"},
-		{Call: "test-rows", Tool: "shell", Input: "go test ./importer", Output: "last row missing", Error: true},
+	rows := "/home/alice/src/atlas/importer/rows.go"
+	desk.Structure(d.Code, 2, sessions.Message{
+		Thinking: "Check the last row before changing the loop.\nThe fixture with a trailing row should fail first, so that the fix is seen to matter.",
+		Calls: []sessions.Call{
+			{Call: "read-rows", Tool: "read_file", Input: `{"path":"importer/rows.go"}`, Output: "for i := 0; i < len(rows)-1; i++ {\n\tif err := imp.write(ctx, rows[i], opts); err != nil {",
+				Files: []sessions.File{{Path: rows, Op: "read"}}},
+			{Call: "test-rows", Tool: "shell", Input: "go test ./importer -run TestRows",
+				Output: "--- FAIL: TestRows/file_with_a_trailing_row (0.00s)\n    rows_test.go:41: got 2 rows, want 3: last row missing\nFAIL", Error: true},
+			{Call: "patch-rows", Tool: "apply_patch",
+				Input:  "*** Begin Patch\n*** Update File: importer/rows.go\n@@\n-for i := 0; i < len(rows)-1; i++ {\n+for i := 0; i < len(rows); i++ {\n*** End Patch",
+				Output: "Success. Updated the following files:\nM importer/rows.go", Files: []sessions.File{{Path: rows, Op: "change"}}},
+			{Call: "drop-fixture", Tool: "delete_file", Input: `{"path":"importer/testdata/rows_without_last.csv"}`, Output: "deleted",
+				Files: []sessions.File{{Path: "/home/alice/src/atlas/importer/testdata/rows_without_last.csv", Op: "delete"}}},
+		}})
+	desk.Structure(d.Code, 5, sessions.Message{Calls: []sessions.Call{
+		{Call: "vet", Tool: "shell", Input: "go vet ./... && go test -race ./...", Output: "ok  \texample.com/atlas/importer\t0.412s"},
 	}})
 	d.Kept = "claude:seed-order"
 	attic.Put(waketest.Session{Key: d.Kept, Agent: "claude", Title: "Seed order for the spring beds",
@@ -125,7 +196,9 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 	attic.Put(waketest.Session{Key: d.Unread, Agent: "opencode", Title: "整理报销流程的自动化脚本",
 		Project: "家庭财务与报销流程自动化工具集", Path: "/home/alice/src/家庭财务与报销流程自动化工具集",
 		UpdatedAt: ms - 18*24*60*minute}, talk(true, 4, ms-18*24*60*minute)...)
-	for _, db := range []*waketest.DB{desk, laptop, attic} {
+	// The structure of every session on desk and laptop is current. Attic
+	// keeps an index of text only.
+	for _, db := range []*waketest.DB{desk, laptop} {
 		db.Exec(waketest.StructureSchema)
 		db.Exec(`INSERT OR REPLACE INTO structure_sessions
  SELECT key,file_mtime,file_size,(SELECT value FROM schema_meta WHERE key='fts_format'),

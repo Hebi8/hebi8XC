@@ -35,9 +35,11 @@ func main() {
 
 	d := n.Data
 	fmt.Printf("\n  %s\n\n", n.URL)
-	fmt.Printf("  %-7s this machine, %d sessions; code blocks and long lines are in %q\n", d.Names[0], d.Sessions[0], d.Code)
-	fmt.Printf("  %-7s online, %d sessions; the long one is %q\n", d.Names[1], d.Sessions[1], d.Long)
-	fmt.Printf("  %-7s offline, %d sessions; a copy is kept of %q, the others, such as %q, cannot be read\n", d.Names[2], d.Sessions[2], d.Kept, d.Unread)
+	fmt.Printf("  %-7s this machine, %d sessions; code blocks, long lines and calls with files are in %q\n", d.Names[0], d.Sessions[0], d.Code)
+	fmt.Printf("  %-7s online, %d sessions; the long one is %q, and %q reads a file %s changed\n", d.Names[1], d.Sessions[1], d.Long, d.Review, d.Names[0])
+	fmt.Printf("  %-7s offline, %d sessions, text only; a copy is kept of %q, the others, such as %q, cannot be read\n", d.Names[2], d.Sessions[2], d.Kept, d.Unread)
+	fmt.Printf("\nSearch for %q (all three machines), %q (more than one answer holds), %q (one call, deep in a long session),\n", d.Term, d.Broad, d.Anchor)
+	fmt.Printf("or the file %s (changed on %s; read on %s too with the operation \"any\").\n", d.File, d.Names[0], d.Names[1])
 	fmt.Printf("\nCalls: %s --data-dir %s show desk/%s\n", filepath.Join(n.Dir, "h8c"), filepath.Join(n.Dir, "node-0"), d.Code)
 	fmt.Printf("\nCtrl-C stops the nodes and removes %s\n", n.Dir)
 
