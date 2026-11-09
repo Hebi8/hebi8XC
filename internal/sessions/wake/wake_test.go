@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -53,7 +54,7 @@ func TestSessionsAreThoseOfThisMachine(t *testing.T) {
 	want := sessions.Session{Key: "claude:a1", Agent: "claude", Reader: "wake", Title: "Fix the parser", Project: "parser",
 		ProjectPath: "/home/alice/src/parser", Branch: "main", Model: "model-x",
 		CreatedAt: 1_699_999_999_000, UpdatedAt: 1_700_000_000_002, Messages: 2}
-	if a != want {
+	if !reflect.DeepEqual(a, want) {
 		t.Errorf("session = %+v\n   want %+v", a, want)
 	}
 	if b.Parent != "claude:a1" || !b.Spawned || !b.Archived || b.Branch != "" || b.Model != "" {

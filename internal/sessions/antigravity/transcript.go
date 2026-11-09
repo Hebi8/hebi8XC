@@ -46,6 +46,7 @@ func transcript(path string) (map[int64]sessions.Message, bool) {
 	}
 	defer f.Close()
 	out := map[int64]sessions.Message{}
+	cwd := projectPath(path)
 	reader := bufio.NewReader(f)
 	var host int64
 	next := 0
@@ -86,7 +87,7 @@ func transcript(path string) (map[int64]sessions.Message, bool) {
 					if json.Unmarshal(c.Args, &str) == nil {
 						input = str
 					}
-					m.Calls = append(m.Calls, sessions.Call{Call: fmt.Sprintf("step-%d-%d", step.Index, i), Tool: c.Name, Input: input, Error: step.Status == "ERROR"})
+					m.Calls = append(m.Calls, sessions.Call{Call: fmt.Sprintf("step-%d-%d", step.Index, i), Tool: c.Name, Input: input, Error: step.Status == "ERROR", Files: toolFiles(c.Name, input, cwd)})
 				}
 				out[step.Index] = m
 				host = step.Index
@@ -117,4 +118,42 @@ func transcript(path string) (map[int64]sessions.Message, bool) {
 		}
 	}
 	return out, true
+}
+
+// Only explicit file tools observed in ACP transcripts are mapped. Shell
+// commands and MCP calls remain opaque; their text is not a file manifest.
+func toolFiles(tool, input, cwd string) []sessions.File {
+	var fields []string
+	op := "change"
+	switch tool {
+	case "client_create_file", "client_edit_file":
+		fields = []string{"target_file"}
+	case "write_to_file", "replace_file_content":
+		fields = []string{"TargetFile"}
+	case "client_view_file":
+		fields, op = []string{"absolute_path"}, "read"
+	case "view_file":
+		fields, op = []string{"AbsolutePath", "absolute_path"}, "read"
+	default:
+		return nil
+	}
+	var args map[string]json.RawMessage
+	if json.Unmarshal([]byte(input), &args) != nil {
+		return nil
+	}
+	for _, field := range fields {
+		var path string
+		if json.Unmarshal(args[field], &path) != nil || strings.TrimSpace(path) == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			// Never resolve against h8c's own process working directory.
+			if !filepath.IsAbs(cwd) {
+				continue
+			}
+			path = filepath.Join(cwd, path)
+		}
+		return []sessions.File{{Path: filepath.Clean(path), Op: op}}
+	}
+	return nil
 }

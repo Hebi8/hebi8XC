@@ -156,7 +156,7 @@ func (x *Index) Sessions(ctx context.Context) ([]sessions.Session, error) {
 func fileStamp(path string) (string, error) {
 	var stamp string
 	// Include WAL changes: the main db's stat alone misses active sessions.
-	for i, file := range []string{path, path + "-wal", transcriptPath(path)} {
+	for i, file := range []string{path, path + "-wal", transcriptPath(path), strings.TrimSuffix(path, ".db") + ".meta"} {
 		st, err := os.Stat(file)
 		if i > 0 && errors.Is(err, os.ErrNotExist) {
 			continue
@@ -164,7 +164,7 @@ func fileStamp(path string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		stamp += fmt.Sprintf("%d:%d;", st.Size(), st.ModTime().UnixNano())
+		stamp += fmt.Sprintf("%d:%d:%d;", i, st.Size(), st.ModTime().UnixNano())
 	}
 	return stamp, nil
 }
@@ -257,7 +257,9 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 			}
 		}
 		if typ == 14 || typ == 15 {
+			s.AddUsage(structure[idx].Usage)
 			for _, c := range structure[idx].Calls {
+				s.AddFiles(c.Files, c.Output != "" && !c.Error)
 				calls++
 				if c.Error {
 					errs++
@@ -287,16 +289,22 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 		s.ToolErrors = &errs
 	}
 	s.UpdatedAt = max(s.UpdatedAt, s.CreatedAt)
+	s.ProjectPath = projectPath(path)
+	if s.ProjectPath != "" {
+		s.Project = filepath.Base(s.ProjectPath)
+	}
+
+	return s, nil
+}
+
+func projectPath(path string) string {
 	var meta struct {
 		CWD string `json:"cwd"`
 	}
 	if b, err := os.ReadFile(strings.TrimSuffix(path, ".db") + ".meta"); err == nil && json.Unmarshal(b, &meta) == nil {
-		s.ProjectPath = meta.CWD
-		if meta.CWD != "" {
-			s.Project = filepath.Base(meta.CWD)
-		}
+		return meta.CWD
 	}
-	return s, nil
+	return ""
 }
 
 func (x *Index) Messages(ctx context.Context, key string, after int64, limit, budget int) ([]sessions.Message, bool, error) {

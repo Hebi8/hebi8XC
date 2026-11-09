@@ -9,28 +9,31 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 )
 
 // Session describes one agent session. It is what nodes tell each other
 // about a session, and what the index of a machine has to provide.
 type Session struct {
-	Key         string `json:"key"` // unique on its machine, "<agent>:<id>"
-	Agent       string `json:"agent"`
-	Title       string `json:"title"`
-	Project     string `json:"project"`
-	ProjectPath string `json:"project_path"`
-	Branch      string `json:"branch,omitempty"`
-	Model       string `json:"model,omitempty"`
-	CreatedAt   int64  `json:"created_at"` // Unix milliseconds
-	UpdatedAt   int64  `json:"updated_at"`
-	Messages    int64  `json:"messages"`
-	Parent      string `json:"parent,omitempty"`  // key of the session this one belongs under
-	Spawned     bool   `json:"spawned,omitempty"` // started by an agent, not by the user
-	Archived    bool   `json:"archived,omitempty"`
-	App         string `json:"app,omitempty"`
-	Reader      string `json:"reader,omitempty"`
-	ToolCalls   *int64 `json:"tool_calls,omitempty"`
-	ToolErrors  *int64 `json:"tool_errors,omitempty"`
+	Key         string   `json:"key"` // unique on its machine, "<agent>:<id>"
+	Agent       string   `json:"agent"`
+	Title       string   `json:"title"`
+	Project     string   `json:"project"`
+	ProjectPath string   `json:"project_path"`
+	Branch      string   `json:"branch,omitempty"`
+	Model       string   `json:"model,omitempty"`
+	CreatedAt   int64    `json:"created_at"` // Unix milliseconds
+	UpdatedAt   int64    `json:"updated_at"`
+	Messages    int64    `json:"messages"`
+	Parent      string   `json:"parent,omitempty"`  // key of the session this one belongs under
+	Spawned     bool     `json:"spawned,omitempty"` // started by an agent, not by the user
+	Archived    bool     `json:"archived,omitempty"`
+	App         string   `json:"app,omitempty"`
+	Reader      string   `json:"reader,omitempty"`
+	ToolCalls   *int64   `json:"tool_calls,omitempty"`
+	ToolErrors  *int64   `json:"tool_errors,omitempty"`
+	Tokens      *Tokens  `json:"tokens,omitempty"`
+	Files       []string `json:"files,omitempty"`
 
 	// Stamp changes whenever the content of the session may have changed.
 	// It stays on the machine.
@@ -65,6 +68,23 @@ type Call struct {
 	Error     bool   `json:"error,omitempty"`
 	Agent     string `json:"agent,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
+	Files     []File `json:"files,omitempty"`
+}
+
+// File records a tool's explicit file argument; Op is change, delete or read.
+type File struct {
+	Path string `json:"path"`
+	Op   string `json:"op"`
+}
+
+// Tokens contains either per-message sums or the source's total alone.
+// Missing values are unknown, distinct from a known zero.
+type Tokens struct {
+	Input      *int64 `json:"input,omitempty"`
+	Output     *int64 `json:"output,omitempty"`
+	CacheRead  *int64 `json:"cache_read,omitempty"`
+	CacheWrite *int64 `json:"cache_write,omitempty"`
+	Total      *int64 `json:"total,omitempty"`
 }
 
 type Usage struct {
@@ -72,6 +92,43 @@ type Usage struct {
 	Output     int64 `json:"output"`
 	CacheRead  int64 `json:"cache_read"`
 	CacheWrite int64 `json:"cache_write"`
+}
+
+// AddUsage sums known message usage, replacing a source-only total if present.
+func (s *Session) AddUsage(u *Usage) {
+	if u == nil {
+		return
+	}
+	if s.Tokens == nil || s.Tokens.Total != nil {
+		s.Tokens = &Tokens{}
+	}
+	add := func(dst **int64, n int64) {
+		if *dst == nil {
+			*dst = new(int64)
+		}
+		**dst += n
+	}
+	add(&s.Tokens.Input, u.Input)
+	add(&s.Tokens.Output, u.Output)
+	add(&s.Tokens.CacheRead, u.CacheRead)
+	add(&s.Tokens.CacheWrite, u.CacheWrite)
+}
+
+// AddFiles keeps the first 500 distinct paths changed by completed calls.
+// Readers establish success from a result without an error; a pending call
+// or a read contributes no path to the session summary.
+func (s *Session) AddFiles(files []File, successful bool) {
+	if !successful {
+		return
+	}
+	for _, f := range files {
+		if len(s.Files) >= MaxSessionFiles {
+			return
+		}
+		if f.Path != "" && (f.Op == "change" || f.Op == "delete") && !slices.Contains(s.Files, f.Path) {
+			s.Files = append(s.Files, f.Path)
+		}
+	}
 }
 
 // Source is the index of the sessions on this machine. Implementations read
@@ -100,6 +157,8 @@ const (
 	MaxText = 200_000
 	// MaxPage is the most sessions or messages in one answer.
 	MaxPage = 500
+	// MaxSessionFiles bounds the distinct changed paths in a session summary.
+	MaxSessionFiles = 500
 	// PageBudget is the size an answer may reach before it is cut off, in
 	// bytes of JSON. One message is always sent, however long.
 	PageBudget = 1 << 20

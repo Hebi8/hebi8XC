@@ -1,6 +1,8 @@
 package antigravity
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -223,5 +225,139 @@ func TestUnreadableTranscriptLeavesDatabaseText(t *testing.T) {
 	msgs, _, err := x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
 	if err != nil || len(msgs) != 1 || msgs[0].Text != "question" {
 		t.Fatalf("messages: %+v %v", msgs, err)
+	}
+}
+
+func TestExplicitToolFiles(t *testing.T) {
+	cwd := filepath.Join(t.TempDir(), "project")
+	absolute := filepath.Join(cwd, "absolute.go")
+	for _, tc := range []struct{ tool, field, op string }{
+		{"client_create_file", "target_file", "change"},
+		{"client_edit_file", "target_file", "change"},
+		{"write_to_file", "TargetFile", "change"},
+		{"replace_file_content", "TargetFile", "change"},
+		{"client_view_file", "absolute_path", "read"},
+		{"view_file", "AbsolutePath", "read"},
+		{"view_file", "absolute_path", "read"},
+	} {
+		t.Run(tc.tool+tc.field, func(t *testing.T) {
+			for _, path := range []string{"src/../main.go", absolute} {
+				raw, _ := json.Marshal(map[string]string{tc.field: path})
+				want := path
+				if !filepath.IsAbs(path) {
+					want = filepath.Join(cwd, path)
+				}
+				got := toolFiles(tc.tool, string(raw), cwd)
+				if !reflect.DeepEqual(got, []sessions.File{{Path: want, Op: tc.op}}) {
+					t.Fatalf("files: %+v", got)
+				}
+			}
+		})
+	}
+	for _, tc := range []struct{ tool, input, cwd string }{
+		{"run_command", `{"command":"rm main.go","TargetFile":"main.go"}`, cwd},
+		{"call_mcp_tool", `{"TargetFile":"main.go"}`, cwd},
+		{"unknown_edit", `{"TargetFile":"main.go"}`, cwd},
+		{"write_to_file", `{"TargetFile":"main.go"}`, ""},
+		{"write_to_file", `{"TargetFile":"main.go"}`, "relative/project"},
+		{"write_to_file", `{"TargetFile":123}`, cwd},
+		{"write_to_file", `{"TargetFile":""}`, cwd},
+		{"write_to_file", `not json`, cwd},
+	} {
+		if got := toolFiles(tc.tool, tc.input, tc.cwd); len(got) != 0 {
+			t.Fatalf("unexpected files: %+v", got)
+		}
+	}
+}
+
+func TestTranscriptSessionTokensAndFiles(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "conversations")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := acptest.New(t, dir, "example")
+	cwd := filepath.Join(t.TempDir(), "project")
+	d.CWD(cwd)
+	d.Put(0, "assistant", "answer", "", "", 1700000000000)
+	d.Put(7, "assistant", "another answer", "", "", 1700000007000)
+	d.Exec("INSERT INTO steps VALUES (8,21,3,X'',X'')")
+	call := func(name, field, path string) map[string]any {
+		return map[string]any{"name": name, "args": map[string]any{field: path}}
+	}
+	d.Transcript(
+		map[string]any{"step_index": 0, "type": "PLANNER_RESPONSE", "input_tokens": 7, "output_tokens": 5, "cache_read_tokens": 3, "tool_calls": []any{
+			call("client_create_file", "target_file", "a.go"),
+			call("client_edit_file", "target_file", "a.go"),
+			call("replace_file_content", "TargetFile", "failed.go"),
+			call("view_file", "AbsolutePath", "read.go"),
+			call("run_command", "command", "touch shell.go"),
+			call("write_to_file", "TargetFile", "pending.go"),
+		}},
+		map[string]any{"step_index": 1, "type": "CODE_ACTION", "content": "created", "status": "DONE"},
+		map[string]any{"step_index": 2, "type": "CODE_ACTION", "content": "edited", "status": "DONE"},
+		map[string]any{"step_index": 3, "type": "CODE_ACTION", "content": "failure", "exit_code": 1},
+		map[string]any{"step_index": 4, "type": "VIEW_FILE", "content": "text"},
+		map[string]any{"step_index": 5, "type": "RUN_COMMAND", "content": "done"},
+		// The pending call has no result before the next planner step.
+		map[string]any{"step_index": 7, "type": "PLANNER_RESPONSE", "input_tokens": 11, "output_tokens": 2, "cache_read_tokens": 4, "tool_calls": []any{
+			map[string]any{"name": "write_to_file", "args": `{"TargetFile":"b.go"}`},
+		}},
+		map[string]any{"step_index": 8, "type": "CODE_ACTION", "content": "written"},
+		// Orphan and non-message transcript rows do not contribute usage.
+		map[string]any{"step_index": 9, "type": "PLANNER_RESPONSE", "input_tokens": 999},
+	)
+	x := Open(dir)
+	list, err := x.Sessions(ctx)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("sessions: %+v %v", list, err)
+	}
+	s := list[0]
+	if s.Tokens == nil || s.Tokens.Total != nil || *s.Tokens.Input != 18 || *s.Tokens.Output != 7 || *s.Tokens.CacheRead != 7 || *s.Tokens.CacheWrite != 0 {
+		t.Fatalf("tokens: %+v", s.Tokens)
+	}
+	if !reflect.DeepEqual(s.Files, []string{filepath.Join(cwd, "a.go"), filepath.Join(cwd, "b.go")}) {
+		t.Fatalf("files: %v", s.Files)
+	}
+	msgs, _, err := x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
+	if err != nil || len(msgs) != 2 || len(msgs[0].Calls) != 6 || len(msgs[0].Calls[2].Files) != 1 || !msgs[0].Calls[2].Error || msgs[0].Calls[3].Files[0].Op != "read" || len(msgs[0].Calls[4].Files) != 0 || len(msgs[1].Calls[0].Files) != 1 {
+		t.Fatalf("messages: %+v %v", msgs, err)
+	}
+	// A cwd-only change invalidates both the metadata and relative file paths.
+	nextCWD := filepath.Join(cwd, "nested")
+	d.CWD(nextCWD)
+	list, err = x.Sessions(ctx)
+	if err != nil || list[0].Stamp == s.Stamp || list[0].Files[0] != filepath.Join(nextCWD, "a.go") {
+		t.Fatalf("cwd update: %+v %v", list, err)
+	}
+	if err := os.Remove(transcriptPath(d.Path)); err != nil {
+		t.Fatal(err)
+	}
+	list, err = x.Sessions(ctx)
+	if err != nil || list[0].Tokens != nil || len(list[0].Files) != 0 {
+		t.Fatalf("no transcript: %+v %v", list, err)
+	}
+}
+
+func TestTranscriptFileCapAndKnownZeroUsage(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "conversations")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	d := acptest.New(t, dir, "example")
+	cwd := filepath.Join(t.TempDir(), "project")
+	d.CWD(cwd)
+	d.Put(0, "assistant", "answer", "", "", 1700000000000)
+	var calls []any
+	for i := 0; i < 505; i++ {
+		calls = append(calls, map[string]any{"name": "client_create_file", "args": map[string]any{"target_file": fmt.Sprintf("file-%03d", i)}})
+	}
+	steps := []any{map[string]any{"step_index": 0, "type": "PLANNER_RESPONSE", "input_tokens": 0, "tool_calls": calls}}
+	for i := 0; i < 505; i++ {
+		steps = append(steps, map[string]any{"step_index": i + 1, "type": "CODE_ACTION", "content": "done"})
+	}
+	d.Transcript(steps...)
+	list, err := Open(dir).Sessions(ctx)
+	if err != nil || len(list) != 1 || len(list[0].Files) != 500 || list[0].Files[499] != filepath.Join(cwd, "file-499") || list[0].Tokens == nil || *list[0].Tokens.Input != 0 {
+		t.Fatalf("cap/zero: %+v %v", list, err)
 	}
 }

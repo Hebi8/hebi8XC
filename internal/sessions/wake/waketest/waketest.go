@@ -80,6 +80,7 @@ type Session struct {
 	Host      string
 	Spawned   bool
 	Archived  bool
+	Tokens    *int64 // NULL when the source has no total
 }
 
 // Message is a row of the messages table.
@@ -130,6 +131,7 @@ func (d *DB) Put(s Session, msgs ...Message) {
 		parent_key, host, spawned) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, 0, ?, ?, ?, ?)`,
 		s.Key, s.Agent, s.Key, s.Title, s.Path, s.Project, null(s.Branch), s.UpdatedAt-1000, s.UpdatedAt,
 		null(s.Model), s.Archived, "/sessions/"+s.Key+".jsonl", s.UpdatedAt, s.Parent, s.Host, s.Spawned)
+	d.Exec(`UPDATE sessions SET tokens_used=? WHERE key=?`, s.Tokens, s.Key)
 	d.Append(s.Key, msgs...)
 }
 

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -230,7 +230,7 @@ func TestUnchangedStampReusesSession(t *testing.T) {
 		t.Fatal("an uncached read must see the replacement", fresh, err)
 	}
 	after, err := x.Sessions(ctx)
-	if err != nil || !slices.Equal(before, after) {
+	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatal(after, err)
 	}
 }
@@ -253,7 +253,7 @@ func TestFailedReadRetainsSessionAndRetries(t *testing.T) {
 		t.Fatal("test database should fail to parse")
 	}
 	after, err := x.Sessions(ctx)
-	if err != nil || !slices.Equal(before, after) {
+	if err != nil || !reflect.DeepEqual(before, after) {
 		t.Fatal("a failed read must keep all prior metadata, including stamp", after, err)
 	}
 	d.Put(0, "user", "Recovered title", "", "", 2000)

@@ -48,7 +48,7 @@ import (
 var required = map[string][]string{
 	"sessions": {"key", "agent_id", "title", "project_path", "project_name", "git_branch",
 		"created_at", "updated_at", "message_count", "model", "archived",
-		"file_size", "file_mtime", "parent_key", "host", "spawned", "source"},
+		"file_size", "file_mtime", "parent_key", "host", "spawned", "source", "tokens_used"},
 	"messages": {"id", "session_key", "sidechain_id", "seq", "role", "ts", "text"},
 }
 
@@ -211,13 +211,21 @@ func (x *Index) Sessions(ctx context.Context) (result []sessions.Session, err er
 		return nil, err
 	}
 	extra, joins := "'', '', 0, 0, 0", ""
-	if structured {
+	if structured != "" {
 		extra = "coalesce(st.file_mtime,'') || ':' || coalesce(st.file_size,'') || ':' || coalesce(st.fts_format,'') || ':' || coalesce(st.rows,'') || ':' || coalesce(st.format,''), coalesce((SELECT value FROM schema_meta WHERE key='fts_format'),''), " + validStructure + ", coalesce(tc.calls,0), coalesce(tc.errors,0)"
 		joins = structureJoin + " LEFT JOIN (SELECT session_key,count(*) calls,sum(is_error) errors FROM tool_calls GROUP BY session_key) tc ON tc.session_key=s.key"
 	}
+	usageColumns := "NULL,NULL,NULL,NULL"
+	if structured == "2" {
+		usageColumns = "u.input,u.output,u.cache_read,u.cache_write"
+		joins += ` LEFT JOIN (SELECT e.session_key,sum(input_tokens) input,sum(output_tokens) output,
+   sum(cache_read_tokens) cache_read,sum(cache_write_tokens) cache_write
+   FROM message_extras e JOIN messages m ON m.session_key=e.session_key AND m.seq=e.seq
+   GROUP BY e.session_key) u ON u.session_key=s.key`
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT s.key,agent_id,title,project_name,project_path,coalesce(git_branch,''),
  coalesce(model,''),coalesce(created_at,0),coalesce(updated_at,0),coalesce(message_count,0),parent_key,spawned,coalesce(archived,0),
- coalesce(s.file_mtime,0),coalesce(s.file_size,0),coalesce(source,''),`+extra+` FROM sessions s `+joins+` WHERE host=''`)
+ coalesce(s.file_mtime,0),coalesce(s.file_size,0),coalesce(source,''),s.tokens_used,`+usageColumns+`,`+extra+` FROM sessions s `+joins+` WHERE host=''`)
 	if err != nil {
 		return nil, err
 	}
@@ -228,16 +236,26 @@ func (x *Index) Sessions(ctx context.Context) (result []sessions.Session, err er
 		var mtime, size, calls, errs int64
 		var stamp, fts string
 		var valid bool
-		if err := rows.Scan(&s.Key, &s.Agent, &s.Title, &s.Project, &s.ProjectPath, &s.Branch, &s.Model, &s.CreatedAt, &s.UpdatedAt, &s.Messages, &s.Parent, &s.Spawned, &s.Archived, &mtime, &size, &s.App, &stamp, &fts, &valid, &calls, &errs); err != nil {
+		var total, input, output, cacheRead, cacheWrite sql.NullInt64
+		if err := rows.Scan(&s.Key, &s.Agent, &s.Title, &s.Project, &s.ProjectPath, &s.Branch, &s.Model, &s.CreatedAt, &s.UpdatedAt, &s.Messages, &s.Parent, &s.Spawned, &s.Archived, &mtime, &size, &s.App, &total, &input, &output, &cacheRead, &cacheWrite, &stamp, &fts, &valid, &calls, &errs); err != nil {
 			return nil, err
 		}
 		s.Reader = "wake"
-		s.Stamp = fmt.Sprintf("%d:%d:%s:%s:%t", mtime, size, stamp, fts, valid)
+		s.Stamp = fmt.Sprintf("%d:%d:%s:%s:%t:%s", mtime, size, stamp, fts, valid, structured)
 		if valid {
 			s.ToolCalls = &calls
 			s.ToolErrors = &errs
-		} else if structured {
+			if structured == "2" {
+				s.AddUsage(usage(input, output, cacheRead, cacheWrite))
+				if err := sessionFiles(ctx, tx, &s); err != nil {
+					return nil, err
+				}
+			}
+		} else if structured != "" {
 			x.note(s.Key, "Wake session structure is stale; showing text only")
+		}
+		if s.Tokens == nil && total.Valid {
+			s.Tokens = &sessions.Tokens{Total: &total.Int64}
 		}
 		out = append(out, s)
 	}
@@ -264,7 +282,7 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 		return nil, false, err
 	}
 	var valid bool
-	if structured {
+	if structured != "" {
 		err = tx.QueryRowContext(ctx, "SELECT "+validStructure+" FROM sessions s "+structureJoin+" WHERE s.key=? AND s.host=''", key).Scan(&valid)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return nil, false, err
@@ -279,6 +297,10 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 		extra = "0, coalesce(e.kind,'text'),coalesce(e.thinking,''),coalesce(e.model,'')"
 		join = " LEFT JOIN message_extras e ON e.session_key=m.session_key AND e.seq=m.seq"
 	}
+	extra += ",NULL,NULL,NULL,NULL"
+	if valid && structured == "2" {
+		extra = "0,coalesce(e.kind,'text'),coalesce(e.thinking,''),coalesce(e.model,''),e.input_tokens,e.output_tokens,e.cache_read_tokens,e.cache_write_tokens"
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT m.id,m.seq,coalesce(m.sidechain_id,''),coalesce(m.role,''),coalesce(m.ts,0),`+text+","+extra+`
  FROM messages m JOIN sessions s ON s.key=m.session_key `+join+` WHERE m.session_key=? AND s.host='' AND m.id>? ORDER BY m.id LIMIT ?`, key, after, limit+1)
 	if err != nil {
@@ -289,22 +311,32 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 	size := 0
 	for rows.Next() {
 		var m sessions.Message
-		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated, &m.Kind, &m.Thinking, &m.Model); err != nil {
+		var input, output, cacheRead, cacheWrite sql.NullInt64
+		if err := rows.Scan(&m.ID, &m.Seq, &m.Sidechain, &m.Role, &m.Time, &m.Text, &m.Truncated, &m.Kind, &m.Thinking, &m.Model, &input, &output, &cacheRead, &cacheWrite); err != nil {
 			return nil, false, err
 		}
+		m.Usage = usage(input, output, cacheRead, cacheWrite)
 		if len(out) == limit {
 			return out, true, nil
 		}
 		if valid {
-			calls, err := tx.QueryContext(ctx, `SELECT call_id,name,coalesce(input,''),coalesce(output,''),is_error,coalesce(child_id,'') FROM tool_calls WHERE session_key=? AND seq=? ORDER BY idx`, key, m.Seq)
+			calls, err := tx.QueryContext(ctx, `SELECT idx,call_id,name,coalesce(input,''),coalesce(output,''),is_error,coalesce(child_id,'') FROM tool_calls WHERE session_key=? AND seq=? ORDER BY idx`, key, m.Seq)
 			if err != nil {
 				return nil, false, err
 			}
 			for calls.Next() {
 				var c sessions.Call
-				if err := calls.Scan(&c.Call, &c.Tool, &c.Input, &c.Output, &c.Error, &c.Agent); err != nil {
+				var idx int64
+				if err := calls.Scan(&idx, &c.Call, &c.Tool, &c.Input, &c.Output, &c.Error, &c.Agent); err != nil {
 					calls.Close()
 					return nil, false, err
+				}
+				if structured == "2" {
+					c.Files, err = callFiles(ctx, tx, key, m.Seq, idx)
+					if err != nil {
+						calls.Close()
+						return nil, false, err
+					}
 				}
 				if c.Agent != "" {
 					agent, _, _ := strings.Cut(key, ":")
