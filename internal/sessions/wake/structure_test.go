@@ -246,7 +246,7 @@ func TestToolFilesAndSessionLimit(t *testing.T) {
 	x := wake.Open(d.Path)
 	defer x.Close()
 	list, err := x.Sessions(ctx)
-	if err != nil || len(list) != 1 || !reflect.DeepEqual(list[0].Files, []string{"/project/a", "/project/b"}) {
+	if err != nil || len(list) != 1 || !reflect.DeepEqual(list[0].Files, []string{"/project/a", "/project/b", "/project/pending"}) {
 		t.Fatalf("files: %+v %v", list, err)
 	}
 	msgs, _, err := x.Messages(ctx, key, 0, 10, sessions.PageBudget)
@@ -263,7 +263,7 @@ func TestToolFilesAndSessionLimit(t *testing.T) {
 	}
 	d.Structure(key, 2, sessions.Message{Calls: []sessions.Call{{Call: "patch", Tool: "patch", Output: "done", Files: many}}})
 	list, err = x.Sessions(ctx)
-	if err != nil || len(list) != 1 || len(list[0].Files) != 500 || list[0].Files[499] != "/project/file-497" {
+	if err != nil || len(list) != 1 || len(list[0].Files) != 500 || list[0].Files[499] != "/project/file-496" {
 		t.Fatalf("file cap: %v %v", list, err)
 	}
 	// Message file lists are preserved; only the session summary is capped.

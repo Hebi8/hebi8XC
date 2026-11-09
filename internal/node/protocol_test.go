@@ -372,11 +372,17 @@ func TestHelloSaysProtocolAndVersion(t *testing.T) {
 
 // The structure sample is additive to the original protocol-1 samples.
 func TestStructuredProtocol1Answers(t *testing.T) {
+	for _, dir := range []string{"protocol-v1-structure", "protocol-v1-phase2"} {
+		t.Run(dir, func(t *testing.T) { checkStructuredProtocol1Answers(t, dir) })
+	}
+}
+
+func checkStructuredProtocol1Answers(t *testing.T, dir string) {
 	c := newClock()
 	laptop := sessionNode(t, c, "laptop")
 	read := func(name string) []byte {
 		t.Helper()
-		raw, err := os.ReadFile(filepath.Join("testdata", "protocol-v1-structure", name))
+		raw, err := os.ReadFile(filepath.Join("testdata", dir, name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,6 +402,15 @@ func TestStructuredProtocol1Answers(t *testing.T) {
 	m := r.Messages[1]
 	if m.Kind != "text" || m.Thinking == "" || m.Usage == nil || m.Usage.Input != 7 || len(m.Calls) != 1 || !m.Calls[0].Error || m.Calls[0].Agent != "claude:child" || !m.Calls[0].Truncated || m.CallsDropped != 2 {
 		t.Fatal("structure fields lost")
+	}
+
+	if dir == "protocol-v1-phase2" {
+		if r.Session.Tokens == nil || *r.Session.Tokens.Input != 7 || len(r.Session.Files) != 1 || len(m.Calls[0].Files) != 1 || m.Calls[0].Files[0].Op != "read" {
+			t.Fatal("phase 2 fields lost on peer read")
+		}
+		if err := laptop.control("/v1/sessions/messages?node=desk&key=claude:0f3a9c", &r); err != nil || r.From != "cache" || len(r.Messages[1].Calls[0].Files) != 1 {
+			t.Fatal("phase 2 cached files lost", err)
+		}
 	}
 
 	// This build must also produce every field, not merely accept the samples.

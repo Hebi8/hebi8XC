@@ -114,9 +114,7 @@ func (s *Session) AddUsage(u *Usage) {
 	add(&s.Tokens.CacheWrite, u.CacheWrite)
 }
 
-// AddFiles keeps the first 500 distinct paths changed by completed calls.
-// Readers establish success from a result without an error; a pending call
-// or a read contributes no path to the session summary.
+// AddFiles keeps the first 500 distinct paths from non-error change/delete calls.
 func (s *Session) AddFiles(files []File, successful bool) {
 	if !successful {
 		return

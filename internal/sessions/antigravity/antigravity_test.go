@@ -130,7 +130,7 @@ func TestPageLimits(t *testing.T) {
 	d.Put(0, "user", strings.Repeat("世", sessions.MaxText+1), "", "", 1000)
 	d.Put(1, "assistant", "answer", "", "", 2000)
 	msgs, more, err := x.Messages(ctx, key, 0, 10, 1)
-	if err != nil || !more || len(msgs) != 1 || !msgs[0].Truncated || utf8.RuneCountInString(msgs[0].Text) != sessions.MaxText || !utf8.ValidString(msgs[0].Text) {
+	if err != nil || !more || len(msgs) != 1 || msgs[0].Truncated || utf8.RuneCountInString(msgs[0].Text) != sessions.MaxText+1 || !utf8.ValidString(msgs[0].Text) {
 		t.Fatalf("large first: count=%d more=%v err=%v", len(msgs), more, err)
 	}
 	msgs, more, err = x.Messages(ctx, key, 1, 10, 1)

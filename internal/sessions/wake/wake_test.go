@@ -129,7 +129,7 @@ func TestMessagesInPages(t *testing.T) {
 	if all[2].Sidechain != "sc-1" || all[0].Sidechain != "" {
 		t.Errorf("side thread: %q, %q", all[2].Sidechain, all[0].Sidechain)
 	}
-	if long := all[3]; !long.Truncated || len([]rune(long.Text)) != sessions.MaxText {
+	if long := all[3]; long.Truncated || len([]rune(long.Text)) != sessions.MaxText+5 {
 		t.Errorf("long message: truncated=%v, %d characters", long.Truncated, len([]rune(long.Text)))
 	}
 	if all[4].Truncated || all[4].Text != "five" {

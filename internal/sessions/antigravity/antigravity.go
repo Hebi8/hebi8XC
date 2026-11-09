@@ -259,7 +259,7 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 		if typ == 14 || typ == 15 {
 			s.AddUsage(structure[idx].Usage)
 			for _, c := range structure[idx].Calls {
-				s.AddFiles(c.Files, c.Output != "" && !c.Error)
+				s.AddFiles(c.Files, !c.Error)
 				calls++
 				if c.Error {
 					errs++
@@ -371,11 +371,7 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 		if err != nil {
 			return nil, false, err
 		}
-		textLimit := sessions.MaxText
-		if hasTranscript {
-			textLimit = int(text.size)
-		}
-		m.Text, m.Truncated, err = text.text(textLimit)
+		m.Text, m.Truncated, err = text.text(int(text.size))
 		if err != nil {
 			return nil, false, err
 		}

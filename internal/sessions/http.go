@@ -29,6 +29,29 @@ func (s *Service) PeerRoutes(mux *http.ServeMux) {
 // ControlRoutes adds what the node's own tools ask it: the sessions of the
 // whole network, and a session to read.
 func (s *Service) ControlRoutes(mux *http.ServeMux) {
+	s.ReadRoutes(mux)
+	mux.HandleFunc("GET /v1/sessions/export", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
+		options := ExportOptions{After: after, Limit: limitParam(q.Get("limit"), 100)}
+		for name, dst := range map[string]**int64{"ack": &options.Ack, "since": &options.Since} {
+			if q.Has(name) {
+				n, err := strconv.ParseInt(q.Get(name), 10, 64)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				*dst = &n
+			}
+		}
+		pg, err := s.Export(r.Context(), options)
+		answer(w, pg, err)
+	})
+
+}
+
+// ReadRoutes exposes only listing and reading, also used by the web interface.
+func (s *Service) ReadRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		since, _ := strconv.ParseInt(q.Get("since"), 10, 64)

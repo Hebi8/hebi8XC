@@ -291,7 +291,7 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 			x.note(key, "Wake session structure is stale; showing text only")
 		}
 	}
-	text, extra, join := fmt.Sprintf("substr(m.text,1,%d)", sessions.MaxText), fmt.Sprintf("length(m.text)>%d, '', '', ''", sessions.MaxText), ""
+	text, extra, join := "m.text", "0, '', '', ''", ""
 	if valid {
 		text = "coalesce(e.full_text,m.text)"
 		extra = "0, coalesce(e.kind,'text'),coalesce(e.thinking,''),coalesce(e.model,'')"

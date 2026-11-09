@@ -223,7 +223,7 @@ func New(cfg Config) (*Node, error) {
 		// the same answers from the same code. Nothing else of the control
 		// socket is offered to a browser.
 		webMux := http.NewServeMux()
-		svc.ControlRoutes(webMux)
+		svc.ReadRoutes(webMux)
 		n.webSrv = &http.Server{
 			Handler:           web.New(webMux, cfg.WebToken, cfg.Web.Addr().(*net.TCPAddr).Port),
 			ReadHeaderTimeout: 5 * time.Second,

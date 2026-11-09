@@ -1,0 +1,51 @@
+{
+  "epoch": "831c54ae3a635dd2",
+  "rev": 1,
+  "messages": [
+    {
+      "id": 1,
+      "seq": 1,
+      "role": "user",
+      "time": 1791803500000,
+      "text": "the parser drops the last token",
+      "kind": "text"
+    },
+    {
+      "id": 2,
+      "seq": 2,
+      "sidechain": "sc-1",
+      "role": "assistant",
+      "text": "a long answer, cut where the limit is",
+      "truncated": true,
+      "kind": "text",
+      "thinking": "Check the end of the loop.",
+      "model": "model-y",
+      "usage": {
+        "input": 7,
+        "output": 5,
+        "cache_read": 3,
+        "cache_write": 0
+      },
+      "calls": [
+        {
+          "call": "test-1",
+          "tool": "shell",
+          "input": "go test ./...",
+          "output": "last token missing",
+          "error": true,
+          "agent": "claude:child",
+          "truncated": true,
+          "files": [
+            {
+              "path": "/home/alice/src/parser/parser.go",
+              "op": "read"
+            }
+          ]
+        }
+      ],
+      "calls_dropped": 2
+    }
+  ],
+  "more": false,
+  "format": 1
+}

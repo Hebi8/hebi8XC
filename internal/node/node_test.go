@@ -1300,7 +1300,7 @@ func TestWebInterface(t *testing.T) {
 	}
 
 	// The control socket has more than the page gets.
-	for _, path := range []string{"/api/v1/status", "/api/v1/peers", "/api/v1/refresh", "/api/v1/roster/refresh", "/v1/sessions", "/v1/hello"} {
+	for _, path := range []string{"/api/v1/sessions/export", "/api/v1/status", "/api/v1/peers", "/api/v1/refresh", "/api/v1/roster/refresh", "/v1/sessions", "/v1/hello"} {
 		if code, body, _ := get(t, b, base+path); code != 404 {
 			t.Errorf("GET %s: %d %s", path, code, body)
 		}

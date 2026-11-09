@@ -255,6 +255,13 @@ func showSession(dir string, args []string, out io.Writer) error {
 	s := r.Session
 	fmt.Fprintf(out, "%s\n%s on %s, %s, %d messages, updated %s\n", oneLine(s.Title, 100),
 		s.Agent, s.Node, s.ProjectPath, s.Messages, s.UpdatedAt.Local().Format(time.DateTime))
+	if s.Tokens != nil {
+		raw, _ := json.Marshal(s.Tokens)
+		fmt.Fprintf(out, "tokens: %s\n", raw)
+	}
+	for _, path := range s.Files {
+		fmt.Fprintf(out, "file: %s\n", path)
+	}
 	switch {
 	case r.Note != "":
 		fmt.Fprintln(out, "note:", r.Note)
@@ -294,6 +301,9 @@ func showSession(dir string, args []string, out io.Writer) error {
 			if call.Output != "" {
 				fmt.Fprintf(out, "    output: %s\n", call.Output)
 			}
+			for _, file := range call.Files {
+				fmt.Fprintf(out, "    file: %s %s\n", file.Op, file.Path)
+			}
 			if call.Truncated {
 				fmt.Fprintln(out, "    (call truncated)")
 			}
@@ -317,4 +327,39 @@ func showSession(dir string, args []string, out io.Writer) error {
 // some machine and ends up in a command the user is invited to paste.
 func quoteArg(arg string) string {
 	return "'" + strings.ReplaceAll(arg, "'", `'\''`) + "'"
+}
+
+// exportSessions reads the local snapshot log over the control socket.
+func exportSessions(dir string, args []string, out io.Writer) error {
+	fs := flag.NewFlagSet("h8c export", flag.ContinueOnError)
+	after := fs.Int64("after", 0, "last delivered export cursor")
+	since := fs.Int64("since", 0, "initial watermark in Unix milliseconds")
+	ack := fs.Int64("ack", 0, "last durably accepted cursor to prune")
+	limit := fs.Int("limit", 100, "maximum items, at most 500")
+	asJSON := fs.Bool("json", false, "print JSON")
+	if _, err := parseAnywhere(fs, args); err != nil {
+		return err
+	}
+	q := url.Values{"after": {strconv.FormatInt(*after, 10)}, "limit": {strconv.Itoa(*limit)}}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "since" {
+			q.Set("since", strconv.FormatInt(*since, 10))
+		}
+		if f.Name == "ack" {
+			q.Set("ack", strconv.FormatInt(*ack, 10))
+		}
+	})
+	var page sessions.ExportPage
+	if err := control.Dial(filepath.Join(dir, node.ControlSocket)).Get(context.Background(), "/v1/sessions/export?"+q.Encode(), &page); err != nil {
+		return err
+	}
+	if *asJSON {
+		return printJSON(out, page)
+	}
+	fmt.Fprintf(out, "epoch: %s\n", page.Epoch)
+	for _, item := range page.Items {
+		fmt.Fprintf(out, "%d %s %s g=%d seq=%d rev=%d\n", item.Cursor, item.Type, item.Key, item.G, item.Seq, item.Rev)
+	}
+	fmt.Fprintf(out, "next: %d, more: %t\n", page.Next, page.More)
+	return nil
 }

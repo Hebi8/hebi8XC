@@ -146,14 +146,10 @@ func toolFiles(tool, input, cwd string) []sessions.File {
 		if json.Unmarshal(args[field], &path) != nil || strings.TrimSpace(path) == "" {
 			continue
 		}
-		if !filepath.IsAbs(path) {
-			// Never resolve against h8c's own process working directory.
-			if !filepath.IsAbs(cwd) {
-				continue
-			}
+		if !filepath.IsAbs(path) && filepath.IsAbs(cwd) {
 			path = filepath.Join(cwd, path)
 		}
-		return []sessions.File{{Path: filepath.Clean(path), Op: op}}
+		return []sessions.File{{Path: path, Op: op}}
 	}
 	return nil
 }

@@ -21,7 +21,7 @@ import (
 // Existing sessions with UpdatedAt < Since get a baseline but no log items.
 // Later changes (including changes to those sessions) and later arrivals are
 // exported regardless of their timestamps. Nil on later calls inherits the
-// persisted watermark; a different non-nil value is rejected. On the first
+// persisted watermark; later calls keep that first watermark. On the first
 // call in a new store, After and Ack are ignored, since they may name a lost
 // epoch. The collector must detect Epoch changes and restart its cursor at 0.
 type ExportOptions struct {
@@ -63,16 +63,6 @@ type ExportItem struct {
 	Deleted bool     `json:"deleted,omitempty"`
 	Session *Session `json:"session,omitempty"`
 	Message *Message `json:"message,omitempty"`
-}
-
-// ErrExportOptions identifies invalid cursors or a change to the watermark.
-var ErrExportOptions = errors.New("invalid session export options")
-
-func (o ExportOptions) validate() error {
-	if o.After < 0 || o.Limit < 0 || (o.Ack != nil && *o.Ack < 0) {
-		return fmt.Errorf("%w: cursors and limit must be nonnegative", ErrExportOptions)
-	}
-	return nil
 }
 
 func (s *Store) exportActive(ctx context.Context) (bool, error) {
@@ -260,31 +250,17 @@ func (s *Store) exportPage(ctx context.Context, options ExportOptions) (ExportPa
 		return ExportPage{}, err
 	}
 	defer tx.Rollback()
-	var since sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT since FROM export_state WHERE id=1`).Scan(&since); err != nil {
-		return ExportPage{}, err
-	}
-	if options.Since != nil && (!since.Valid || since.Int64 != *options.Since) {
-		return ExportPage{}, fmt.Errorf("%w: since differs from the stored watermark", ErrExportOptions)
-	}
 	out := ExportPage{Next: options.After, Items: []ExportItem{}}
 	if err := tx.QueryRowContext(ctx, `SELECT v FROM meta WHERE k='epoch'`).Scan(&out.Epoch); err != nil {
 		return ExportPage{}, err
 	}
 	if options.Ack != nil {
-		var last int64
-		if err := tx.QueryRowContext(ctx, `SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name='export_log'),0)`).Scan(&last); err != nil {
-			return ExportPage{}, err
-		}
-		if *options.Ack > last {
-			return ExportPage{}, fmt.Errorf("%w: ack exceeds this epoch's last cursor", ErrExportOptions)
-		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM export_log WHERE cursor<=?`, *options.Ack); err != nil {
 			return ExportPage{}, err
 		}
 	}
 	limit := options.Limit
-	if limit == 0 {
+	if limit < 1 {
 		limit = 100
 	}
 	limit = min(limit, MaxPage)

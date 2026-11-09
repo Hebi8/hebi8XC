@@ -140,12 +140,12 @@ h8c sessions / h8c show --control socket--> node: own feed + copies + cached mes
 - It opens the database read-only, with a busy timeout, the way Wake's own side tools do. A reader does not block Wake's writes. It never changes the journal mode and never writes.
 - The database is Wake's internal format. Everything that depends on it is in that one package, checked against Wake v0.9.2 and v0.10.2. Before reading, it checks that the tables and columns it uses exist. If not, it reports that it cannot make out the structure of the index, and Wake's last successful list is kept while ACP can still update. If Wake has never been read successfully, the local listing fails; other machines' sessions are still listed. It looks again every round, so a later repair is picked up.
 - Sessions that Wake mirrored from other hosts (`host` not empty) are left out. They belong to another machine.
-- The fork's optional format-1 side tables add calls, thinking, model and full text. They are read in the same SQLite snapshot as the indexed rows. Structure is used only when the session's structure stamp matches its file size, modification time, FTS format and actual message-row count. Missing or unknown structure is logged once per index; stale structure once per session, and both show indexed text only. The structure stamp joins the feed fingerprint, so a backfill or a change beyond the indexed text moves the revision.
+- The fork's optional format-1 side tables add calls, thinking, model and full text. Format 2 additionally reads nullable per-message usage from `message_extras` and file arguments from `tool_files`; format 1 remains readable. They are read in the same SQLite snapshot as the indexed rows. Structure is used only when the session's structure stamp matches its file size, modification time, FTS format and actual message-row count. Missing or unknown structure is logged once per index; stale structure once per session, and both show indexed text only. The structure stamp joins the feed fingerprint, so a backfill or a change beyond the indexed text moves the revision.
 - What it reads of a session: key (`<agent>:<id>`), agent, title, project name and path, branch, model, creation and update time, message count, parent session, whether an agent spawned it, whether it is archived. Of a message: Wake's text for it, role, time, number, side thread. This is the text Wake indexes, not a rendering of the session file.
 
 Where `wake-cli` is found, on PATH or through `--wake-cli`, the node runs `wake-cli refresh` every 2 minutes, and `wake-cli index` first if there is no index. While the Wake app runs, both commands leave the index alone and succeed, because the app keeps it current. A `refresh` that takes more than 2 minutes, or an `index` that takes more than 10, is stopped; the round goes on with the index as it is and with the peers. Without `wake-cli` an existing index is read as it is. The index is taken from Wake's default location unless `--wake-db` names another, and it does not have to exist when the node starts: it is looked for every round.
 
-`internal/sessions/antigravity` also reads `~/.gemini/antigravity-acp/conversations/*.db` directly (override with `--acp-dir`), with the project path from the adjacent `.meta` file's `cwd`. Each database is opened read-only with a busy timeout and one read transaction, including committed WAL data. It never changes journal mode. A missing directory is optional before its first successful listing. Session metadata is cached by filename and the sizes and modification times of the database, its WAL and the optional adjacent brain transcript. Unchanged files reuse their cached metadata without reopening SQLite. A failed read keeps the last successful metadata and stamp so the file is retried next round; a never-readable file is skipped. Only a file absent from a successful directory listing is removed. Empty databases with the expected tables are listed as empty sessions.
+`internal/sessions/antigravity` also reads `~/.gemini/antigravity-acp/conversations/*.db` directly (override with `--acp-dir`), with the project path from the adjacent `.meta` file's `cwd`. Each database is opened read-only with a busy timeout and one read transaction, including committed WAL data. It never changes journal mode. A missing directory is optional before its first successful listing. Session metadata is cached by filename and the sizes and modification times of the database, its WAL, the `.meta` file and the optional adjacent brain transcript. Unchanged files reuse their cached metadata without reopening SQLite. A failed read keeps the last successful metadata and stamp so the file is retried next round; a never-readable file is skipped. Only a file absent from a successful directory listing is removed. Empty databases with the expected tables are listed as empty sessions.
 
 The ACP protobuf fields were verified against the descriptors and historical replay in `agy_acp_server.par` v1.0.0 (`92521fc3cbd964bd`):
 
@@ -175,7 +175,7 @@ Two routes on the peer link, so only roster members reach them:
 | `GET /v1/sessions?after=REV&limit=N` | `{epoch, changes: [{rev, deleted, key, agent, title, ...}], more}`, in order of revision |
 | `GET /v1/sessions/messages?key=KEY&after=ID&limit=N` | `{epoch, rev, messages: [{id, seq, role, time, text, sidechain, truncated}], more}`, in order |
 
-- Message pages optionally carry `format: 1`. Messages optionally carry `kind`, `thinking`, `calls`, `usage` and `model`; session entries add `app`, `reader` and call/error counts when known. Old readers ignore them. Call input and output are each cut at 4 KiB on the wire and marked `truncated`, thinking at 32 KiB, and calls at 512 KiB of JSON per message, with `calls_dropped` reporting omitted calls. Local reads keep the source text and structure.
+- Message pages optionally carry `format: 1`. Messages optionally carry `kind`, `thinking`, `calls`, `usage` and `model`; session entries add `app`, `reader`, call/error counts, `tokens` and `files` when known. Calls additionally carry optional `files: [{path, op}]`, where `op` is `change`, `delete` or `read`. Old readers ignore them. Call input and output are each cut at 4 KiB on the wire and marked `truncated`, thinking at 32 KiB, and calls at 512 KiB of JSON per message, with `calls_dropped` reporting omitted calls. Local reads keep the source text and structure.
 - An answer holds at most 500 items and about 1 MiB of JSON, whichever comes first, but always one item. Message text is cut at 200 000 characters and marked. The reader accepts answers up to 8 MiB.
 - A page of messages is cut while it is read from the index. The node that answers never holds more of a session in memory than it sends.
 - Only sessions in the feed can be read. A key is a value in a query, never part of a path or of SQL.
@@ -197,11 +197,75 @@ A session of this machine is read straight from the index. A session of another 
 
 Nothing is ever removed from the cache except what its machine deleted.
 
+### Usage and files
+
+All new fields are optional additions to protocol 1. Missing usage means unknown, not zero. With per-message usage, session `tokens` sums `input`, `output`, `cache_read` and `cache_write` separately across those messages. Without it, Wake's known `tokens_used` becomes `tokens: {"total": N}`; without either source the field is absent. Four NULL usage columns mean no message usage. Partial usage rows use zero for the other categories, as in the existing message usage model.
+
+A call's `files` lists explicit file arguments, including reads and failed calls. Session `files` contains at most the first 500 distinct paths in non-error calls with `op: change` or `delete`. Empty output does not imply failure. Wake resolves relative paths using the session cwd; when no cwd is available it retains the path. ACP follows the same rule for the observed file tools: `client_create_file` and `client_edit_file` (`target_file`), `write_to_file` and `replace_file_content` (`TargetFile`), `client_view_file` (`absolute_path`) and `view_file` (`AbsolutePath` or `absolute_path`). Shell commands are not interpreted as file operations.
+
+The format marker and structure freshness stamp participate in the session fingerprint. A format-1 to format-2 upgrade and a later successful backfill move the feed revision even when the indexed message text is unchanged. Schema 2 also republishes local metadata once and replays remote metadata while retaining cached copies. `h8c sessions --json` and `h8c show --json` retain these fields; plain `h8c show` prints session totals and paths, and file operations beneath each call.
+
 ### Asking the node
 
 On the control socket: `GET /v1/sessions` with `node`, `agent`, `project`, `since`, `text` (repeatable) and `limit` lists the sessions of all nodes, newest first, each with its node and whether that node is online, plus one entry per node with the time its sessions were last read. `GET /v1/sessions/messages` with `node`, `key`, `after` and `limit` reads a page of a session. `h8c sessions` and `h8c show` are these two calls; with `--json` they print the answer as it is, for programs. A session is named `NODE/KEY`, with the node's name where that is unambiguous and its id otherwise.
 
 A session that cannot be read is answered with an error status and a sentence in English, which is what `h8c show` prints. For the reasons a program may want to put in its own words the answer also has the header `H8c-Error` with one word: `not-found`, `offline-not-read` (the node is offline and there is no copy), `incompatible-not-read` (it speaks another protocol and there is no copy) or `feed-restarted` (try again in a moment). The header is optional: a reason without a word has none, and a reader that does not know a word shows the sentence. The page uses it to give these reasons in the reader's language.
+
+### Local export
+
+`GET /v1/sessions/export?after=N&limit=N&ack=N&since=W` exists only on the private control socket. It is not registered on the peer server or the web server. The CLI equivalent is `h8c export --after N --since W [--ack N] [--limit N] --json`. `since` is an absolute Unix millisecond timestamp, not a rolling duration. It is optional; omitting it on the first request includes all local sessions.
+
+The first request initializes the export and saves its watermark in `sessions.db`. Existing sessions whose `updated_at` is before W get a scan baseline but no snapshots. Later changes to those sessions emit their whole current contents; sessions first discovered after initialization are included even with older timestamps. Later requests retain the first watermark, including across restarts. Before initialization, normal refreshes publish the feed but do not build an export history.
+
+After initialization, each local refresh scans sessions whose feed revision has advanced. It appends a session snapshot for each changed entry, including title, span, counts, tokens, files and deletion, then a snapshot for each new or changed message. A stamp-only revision also emits a session item. Message fingerprints exclude the index's paging ID. Reading the export serves these immutable snapshots; replacing an index row does not change an earlier export item. Only this machine's source rows are included, never cached peer rows.
+
+The database schema number advances once to 2. `export_log` holds snapshots with an AUTOINCREMENT cursor; `export_scan` holds each session's last scanned revision, generation and whether it has been emitted; `export_messages` retains message identity and fingerprints. Snapshot appends and scan-state updates share one SQLite transaction. A failure rolls back both and the next refresh retries, even if the feed revision is already current. Sources are read in pages, with one changed session's messages held in memory during comparison.
+
+The response is `{epoch, items, next, more}`. `after` is exclusive. `next` is the last delivered cursor, or the supplied `after` on an empty page; it remains nonzero at the end. `limit` defaults to 100 and is capped at 500. The usual approximate 1 MiB page budget applies, but one complete item is always returned even if it exceeds that budget. Message text and structured fields are not cut by export; source-level cuts still apply.
+
+Every item has `cursor`, `type`, `key`, `agent`, `g`, `seq` and `rev`. A `session` item has a nested `session` snapshot and `seq: 0`; a `message` item has a nested `message` snapshot and its original `seq`. `deleted: true` appears only on session tombstones. Session/message times are Unix milliseconds. `rev` is the local feed revision at scanning, not the export cursor. The message's `id` is only its source paging cursor; consumers identify messages by `(key, g, seq)`.
+
+Generation `g` begins at 0. If a previously observed seq now has a different role or time, the generation increases once and the entire current session is emitted again. The session item identifies the new generation. Old-generation log items remain unchanged until acknowledged; consumers keep their old-generation records. A changed body with the same role and time is an update in the current generation.
+
+`ack=N` deletes retained snapshots at or below N in this epoch, keeping scan baselines and the monotonic cursor. Send it only after the destination has durably accepted those items. There is one acknowledgement stream per store, not separate retention for multiple collectors. The response always carries the store epoch. When a store is lost, the collector must detect the new epoch and reset its cursor to 0. The very first export request of a new store ignores `after` and `ack` from the old store, then applies the supplied `since` while building its new baseline.
+
+A complete example page (all values are fictional):
+
+```json
+{
+  "epoch": "0123456789abcdef",
+  "items": [
+    {
+      "cursor": 1, "type": "session", "key": "codex:example", "agent": "codex",
+      "g": 0, "seq": 0, "rev": 1,
+      "session": {
+        "key": "codex:example", "agent": "codex", "title": "Fix the parser",
+        "project": "parser", "project_path": "/home/alice/src/parser",
+        "created_at": 1791803500000, "updated_at": 1791803600000, "messages": 1,
+        "app": "terminal", "reader": "wake", "tool_calls": 1, "tool_errors": 0,
+        "tokens": {"input": 7, "output": 5, "cache_read": 3, "cache_write": 0},
+        "files": ["/home/alice/src/parser/main.go"]
+      }
+    },
+    {
+      "cursor": 2, "type": "message", "key": "codex:example", "agent": "codex",
+      "g": 0, "seq": 1, "rev": 1,
+      "message": {
+        "id": 1, "seq": 1, "role": "assistant", "time": 1791803600000,
+        "text": "Fixed the last token.", "kind": "text", "thinking": "Check the loop boundary.",
+        "model": "model-x",
+        "usage": {"input": 7, "output": 5, "cache_read": 3, "cache_write": 0},
+        "calls": [{"call": "edit-1", "tool": "edit", "input": "{}", "output": "done",
+          "files": [{"path": "/home/alice/src/parser/main.go", "op": "change"}]}]
+      }
+    }
+  ],
+  "next": 2,
+  "more": false
+}
+```
+
+A later deletion emits a session item with `deleted: true` and the latest `g`; no message snapshots are deleted except through ack. `gone` and `forget` remain a later phase.
 
 ## Web interface
 
@@ -250,7 +314,7 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 | `account.json` | GitHub account the node is logged in to: id and login |
 | `github_keys.json` | Cache of the GitHub roster |
 | `peers.json` | Node list |
-| `sessions.db` | Session feed of this node, copies of the others' feeds, cached messages (SQLite, mode 600) |
+| `sessions.db` | Session feed of this node, copies of the others' feeds, cached messages and local export snapshots/baselines (SQLite, mode 600) |
 | `web.token` | What opens the web interface (mode 600) |
 | `control.sock` | Control socket, while the node runs |
 | `lock` | Held by the running node |

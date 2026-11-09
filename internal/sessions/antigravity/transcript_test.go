@@ -258,8 +258,6 @@ func TestExplicitToolFiles(t *testing.T) {
 		{"run_command", `{"command":"rm main.go","TargetFile":"main.go"}`, cwd},
 		{"call_mcp_tool", `{"TargetFile":"main.go"}`, cwd},
 		{"unknown_edit", `{"TargetFile":"main.go"}`, cwd},
-		{"write_to_file", `{"TargetFile":"main.go"}`, ""},
-		{"write_to_file", `{"TargetFile":"main.go"}`, "relative/project"},
 		{"write_to_file", `{"TargetFile":123}`, cwd},
 		{"write_to_file", `{"TargetFile":""}`, cwd},
 		{"write_to_file", `not json`, cwd},
@@ -315,7 +313,7 @@ func TestTranscriptSessionTokensAndFiles(t *testing.T) {
 	if s.Tokens == nil || s.Tokens.Total != nil || *s.Tokens.Input != 18 || *s.Tokens.Output != 7 || *s.Tokens.CacheRead != 7 || *s.Tokens.CacheWrite != 0 {
 		t.Fatalf("tokens: %+v", s.Tokens)
 	}
-	if !reflect.DeepEqual(s.Files, []string{filepath.Join(cwd, "a.go"), filepath.Join(cwd, "b.go")}) {
+	if !reflect.DeepEqual(s.Files, []string{filepath.Join(cwd, "a.go"), filepath.Join(cwd, "pending.go"), filepath.Join(cwd, "b.go")}) {
 		t.Fatalf("files: %v", s.Files)
 	}
 	msgs, _, err := x.Messages(ctx, "antigravity-acp:example", 0, 10, sessions.PageBudget)
@@ -359,5 +357,14 @@ func TestTranscriptFileCapAndKnownZeroUsage(t *testing.T) {
 	list, err := Open(dir).Sessions(ctx)
 	if err != nil || len(list) != 1 || len(list[0].Files) != 500 || list[0].Files[499] != filepath.Join(cwd, "file-499") || list[0].Tokens == nil || *list[0].Tokens.Input != 0 {
 		t.Fatalf("cap/zero: %+v %v", list, err)
+	}
+}
+
+func TestRelativeFileWithoutCWD(t *testing.T) {
+	for _, cwd := range []string{"", "relative/project"} {
+		got := toolFiles("write_to_file", `{"TargetFile":"../main.go"}`, cwd)
+		if !reflect.DeepEqual(got, []sessions.File{{Path: "../main.go", Op: "change"}}) {
+			t.Fatalf("files: %+v", got)
+		}
 	}
 }

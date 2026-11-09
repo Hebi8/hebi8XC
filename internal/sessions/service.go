@@ -213,9 +213,6 @@ func (s *Service) refreshLocal(ctx context.Context) error {
 // Further calls read the log even if the index is temporarily unavailable;
 // RefreshLocal (also called by SyncLocal) appends subsequent changes.
 func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportPage, error) {
-	if err := options.validate(); err != nil {
-		return ExportPage{}, err
-	}
 	s.Store.exportMu.Lock()
 	defer s.Store.exportMu.Unlock()
 	active, err := s.Store.exportActive(ctx)
@@ -446,6 +443,8 @@ type Entry struct {
 	Reader       string    `json:"reader,omitempty"`
 	ToolCalls    *int64    `json:"tool_calls,omitempty"`
 	ToolErrors   *int64    `json:"tool_errors,omitempty"`
+	Tokens       *Tokens   `json:"tokens,omitempty"`
+	Files        []string  `json:"files,omitempty"`
 }
 
 // Listing is the answer to h8c sessions.
@@ -586,6 +585,7 @@ func entry(sess Session, n *Node, nodes map[string]*Node) Entry {
 		CreatedAt: time.UnixMilli(sess.CreatedAt).UTC(), UpdatedAt: time.UnixMilli(sess.UpdatedAt).UTC(),
 		Messages: sess.Messages, Parent: sess.Parent, Spawned: sess.Spawned, Archived: sess.Archived,
 		App: sess.App, Reader: sess.Reader, ToolCalls: sess.ToolCalls, ToolErrors: sess.ToolErrors,
+		Tokens: sess.Tokens, Files: sess.Files,
 	}
 }
 
