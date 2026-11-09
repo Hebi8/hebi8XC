@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -32,6 +33,8 @@ import (
 type Store struct {
 	db  *sql.DB
 	now func() time.Time
+	// Serialize local refreshes with export initialization and acknowledgement.
+	exportMu sync.Mutex
 }
 
 const schema = `
@@ -127,6 +130,10 @@ func OpenStore(path string, now func() time.Time) (*Store, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	if err := s.migrateStructure(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := s.migrateExport(); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -675,7 +682,7 @@ func (s *Store) CachedMessages(ctx context.Context, node, key string, c Cached, 
 	return out, false, rows.Err()
 }
 
-// Phase 1 only adds copy storage; the search and export migrations come later.
+// Phase 1 adds copy storage and republishes metadata exactly once.
 func (s *Store) migrateStructure() error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -705,6 +712,56 @@ func (s *Store) migrateStructure() error {
  UPDATE sessions SET print='';
  UPDATE nodes SET cursor=0;
  INSERT INTO meta(k,v) VALUES ('schema','1');`)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Schema 2 adds the local export without resetting feed revisions or epochs.
+func (s *Store) migrateExport() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var version string
+	if err := tx.QueryRow(`SELECT v FROM meta WHERE k='schema'`).Scan(&version); err != nil {
+		return err
+	}
+	if version == "2" {
+		return nil
+	}
+	if version != "1" {
+		return fmt.Errorf("unsupported sessions schema %q", version)
+	}
+	_, err = tx.Exec(`
+-- No row until the first export: startup refreshes must not defeat since.
+CREATE TABLE IF NOT EXISTS export_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  since INTEGER
+);
+CREATE TABLE IF NOT EXISTS export_log (
+  cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+  item TEXT NOT NULL
+);
+-- The baseline survives ack, including sessions excluded by the watermark.
+CREATE TABLE IF NOT EXISTS export_scan (
+  key TEXT PRIMARY KEY,
+  rev INTEGER NOT NULL,
+  g INTEGER NOT NULL,
+  logged INTEGER NOT NULL
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS export_messages (
+  key TEXT NOT NULL,
+  g INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  role TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  print TEXT NOT NULL,
+  PRIMARY KEY (key, g, seq)
+) WITHOUT ROWID;
+UPDATE meta SET v='2' WHERE k='schema';`)
 	if err != nil {
 		return err
 	}

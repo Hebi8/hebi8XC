@@ -159,33 +159,81 @@ func (s *Service) SyncLocal(ctx context.Context) {
 			s.Log.Debug("session index refreshed", "said", said)
 		}
 	}
-	current, err := s.Source.Sessions(ctx)
-	if err != nil {
+	if err := s.RefreshLocal(ctx); err != nil {
 		level := slog.LevelWarn
 		if errors.Is(err, ErrNoIndex) {
-			level = slog.LevelInfo // normal on a machine without the indexer
+			level = slog.LevelInfo
 		}
 		s.say(level, "source", "sessions of this machine are not shared: "+err.Error())
 		s.setLocalNote(err.Error())
-		return
+	}
+}
+
+// RefreshLocal reads the local index and updates the feed. Once Export has
+// initialized its watermark, it also snapshots changed local sessions. It does
+// not invoke the external indexer. A failed export scan is returned and retried
+// even if the feed revision does not change on the next refresh.
+func (s *Service) RefreshLocal(ctx context.Context) error {
+	s.Store.exportMu.Lock()
+	defer s.Store.exportMu.Unlock()
+	return s.refreshLocal(ctx)
+}
+
+// refreshLocal runs with Store.exportMu held, also during first Export.
+func (s *Service) refreshLocal(ctx context.Context) error {
+	if s.Source == nil {
+		return ErrNoIndex
+	}
+	current, err := s.Source.Sessions(ctx)
+	if err != nil {
+		return err
 	}
 	changed, err := s.Store.SetLocal(ctx, s.Self.ID, current)
 	if err != nil {
-		s.say(slog.LevelWarn, "source", "session feed not updated: "+err.Error())
-		s.setLocalNote(err.Error())
-		return
+		return fmt.Errorf("session feed not updated: %w", err)
+	}
+	if err := s.Store.scanExport(ctx, s.Self.ID, s.Source, nil); err != nil {
+		return fmt.Errorf("session export not updated: %w", err)
 	}
 	if stale, ok := s.Source.(interface{ Stale() error }); ok && stale.Stale() != nil {
-		note := "showing the last list of a source that cannot be read: " + stale.Stale().Error()
-		s.say(slog.LevelWarn, "source", note)
-		s.setLocalNote(note)
-		return
+		return fmt.Errorf("showing the last list of a source that cannot be read: %w", stale.Stale())
 	}
 	s.setLocalNote("")
-	s.say(slog.LevelInfo, "source", fmt.Sprintf("sharing the sessions of this machine (%d)", len(current)))
-	if changed > 0 {
-		s.Log.Debug("session feed updated", "sessions", len(current), "changed", changed)
+	if s.Log != nil {
+		s.say(slog.LevelInfo, "source", fmt.Sprintf("sharing the sessions of this machine (%d)", len(current)))
+		if changed > 0 {
+			s.Log.Debug("session feed updated", "sessions", len(current), "changed", changed)
+		}
 	}
+	return nil
+}
+
+// Export returns immutable local snapshots, never peer copies. The first call
+// refreshes the local feed and atomically establishes Since and its baseline.
+// Further calls read the log even if the index is temporarily unavailable;
+// RefreshLocal (also called by SyncLocal) appends subsequent changes.
+func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportPage, error) {
+	if err := options.validate(); err != nil {
+		return ExportPage{}, err
+	}
+	s.Store.exportMu.Lock()
+	defer s.Store.exportMu.Unlock()
+	active, err := s.Store.exportActive(ctx)
+	if err != nil {
+		return ExportPage{}, err
+	}
+	if !active {
+		if err := s.refreshLocal(ctx); err != nil {
+			return ExportPage{}, err
+		}
+		if err := s.Store.scanExport(ctx, s.Self.ID, s.Source, &options); err != nil {
+			return ExportPage{}, err
+		}
+		// These may belong to a lost store. They cannot acknowledge this
+		// epoch's newly created snapshots before the caller has seen them.
+		options.After, options.Ack = 0, nil
+	}
+	return s.Store.exportPage(ctx, options)
 }
 
 func (s *Service) dueRefresh() bool {
