@@ -8,6 +8,7 @@
   --accent: #0b6e69;
   --accent-bg: #e3f1f0;
   --warn: #8a5300;
+  --mark: #f6e3a1;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
 }
 @media (prefers-color-scheme: dark) {
@@ -20,6 +21,7 @@
     --accent: #5cc4bd;
     --accent-bg: #1d3432;
     --warn: #e0a84a;
+    --mark: #5a4914;
   }
 }
 
@@ -96,43 +98,113 @@ summary { cursor: pointer; color: var(--dim); }
 .bad, #machines-note { color: var(--warn); }
 #machines-note { font-size: 0.87rem; margin: 0.4rem 0 0; }
 
-#filters { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.75rem 0 0.5rem; }
+/* The two views on the left: the list of sessions, and the search. */
+#modes { display: flex; margin: 0.75rem 0 0; border-bottom: 1px solid var(--line); }
+#modes button {
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  margin-bottom: -1px;
+  padding: 0.3rem 0.8rem;
+  background: none;
+  color: var(--dim);
+}
+#modes button:hover { color: var(--text); }
+#modes button[aria-pressed="true"] { color: var(--text); border-bottom-color: var(--accent); font-weight: 600; }
+
+#filters, #search { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.6rem 0 0.5rem; }
 #filters > * { flex: 1 1 8rem; min-width: 0; }
 #q { flex-basis: 100%; }
+#search > input, #search > select { flex: 1 1 8rem; min-width: 0; }
+#search > #s-q { flex-basis: 100%; }
+#search > #s-file { flex: 2 1 12rem; }
+#s-range:not([hidden]), #search .actions { display: flex; flex-basis: 100%; gap: 0.4rem; align-items: center; }
+#s-range label { display: flex; flex: 1 1 0; min-width: 0; gap: 0.3rem; align-items: center; color: var(--dim); }
+#s-range input { flex: 1 1 auto; min-width: 0; }
+#s-more { flex-basis: 100%; font-size: 0.9rem; }
+#s-more .fields { display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; margin-top: 0.4rem; align-items: center; }
+#s-more .fields > * { flex: 1 1 11rem; min-width: 0; }
+#s-more .fields > label:not(.check) { display: flex; gap: 0.4rem; align-items: center; color: var(--dim); }
+#s-more .fields select { flex: 1 1 auto; min-width: 0; }
+#search .actions { justify-content: space-between; }
+.check { display: inline-flex; gap: 0.35rem; align-items: center; cursor: pointer; }
+.check input { margin: 0; padding: 0; }
 
-#list-note, #reader-empty { color: var(--dim); }
-#list { list-style: none; margin: 0; padding: 0; }
-#list li {
+#list-note, #reader-empty, #search-note { color: var(--dim); }
+#search-note { margin: 0.2rem 0 0.5rem; font-size: 0.9rem; }
+
+/* How each machine was searched. What answered in full shares one line;
+   what did not has a line of its own that says what is missing. */
+#search-nodes { list-style: none; margin: 0 0 0.6rem; padding: 0; font-size: 0.87rem; }
+#search-nodes li { padding: 0.15rem 0; overflow-wrap: anywhere; }
+#search-nodes li.short {
+  margin: 0.25rem 0;
+  padding: 0.3rem 0.6rem;
+  background: var(--panel);
+  border-left: 3px solid var(--warn);
+}
+#search-nodes .name { font-weight: 600; }
+#search-nodes .live .name + .name::before { content: "· "; font-weight: 400; color: var(--dim); margin-left: 0.35rem; }
+#search-nodes .state { margin-left: 0.5rem; color: var(--dim); }
+#search-nodes .short .state { color: var(--warn); }
+#search-nodes .why { color: var(--dim); }
+
+#list, #hits { list-style: none; margin: 0; padding: 0; }
+#list li, #hits li {
   padding: 0.45rem 0.6rem;
   border-left: 3px solid transparent;
   border-bottom: 1px solid var(--line);
   cursor: pointer;
 }
-#list li:hover { background: var(--panel); }
-#list li.selected { border-left-color: var(--accent); background: var(--accent-bg); }
-#list .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#list .m {
+#list li:hover, #hits li:hover { background: var(--panel); }
+#list li.selected, #hits li.selected { border-left-color: var(--accent); background: var(--accent-bg); }
+#list .t, #hits .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#list .m, #hits .m {
   display: flex;
   gap: 0.6rem;
   color: var(--dim);
   font-size: 0.83rem;
   white-space: nowrap;
 }
-#list .m span { flex: none; }
-#list .m .where { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
-#list .m .grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+#list .m span, #hits .m span { flex: none; }
+#list .m .where, #hits .m .where { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; }
+#list .m .grow, #hits .m .grow { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* A narrow list has no room for all of it in one line, and what gave way
    was the project. There it is two lines: the machine and the time, then
    the agent with the project, and the count. */
 @media (max-width: 32rem) {
-  #list .m { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 0.6rem; }
-  #list .m .where { grid-area: 1 / 1; max-width: none; }
-  #list .m .when { grid-area: 1 / 2; justify-self: end; }
-  #list .m .grow { grid-area: 2 / 1; }
-  #list .m .count { grid-area: 2 / 2; justify-self: end; }
+  #list .m, #hits .m { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 0.6rem; }
+  #list .m .where, #hits .m .where { grid-area: 1 / 1; max-width: none; }
+  #list .m .when, #hits .m .when { grid-area: 1 / 2; justify-self: end; }
+  #list .m .grow, #hits .m .grow { grid-area: 2 / 1; }
+  #list .m .count, #hits .m .count { grid-area: 2 / 2; justify-self: end; }
 }
+/* A place found: the call it is, and the text around the match, at most
+   three lines of it. */
+#hits .call { font-size: 0.83rem; color: var(--dim); margin-top: 0.1rem; overflow-wrap: anywhere; }
+#hits .call > *, .msg .calls summary > * { margin-right: 0.6rem; }
+#hits .snip {
+  margin: 0.15rem 0 0;
+  font-size: 0.87rem;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+mark { background: var(--mark); color: inherit; border-radius: 2px; }
+.tool { font-family: var(--mono); font-weight: 600; color: var(--text); }
+/* A file keeps what was done to it in front of its path, and goes to a
+   line of its own when it does not fit; a long path breaks after a slash. */
+.file { display: inline-block; max-width: 100%; vertical-align: top; overflow-wrap: anywhere; }
+.file .op { color: var(--dim); }
+.file .path { font-family: var(--mono); font-size: 0.95em; }
+#search-more { margin: 0.75rem 0; text-align: center; color: var(--dim); font-size: 0.9rem; }
+#search-more p { margin: 0 0 0.4rem; }
 /* Not "display" on the id alone: that would show the button while it is hidden. */
 #more:not([hidden]), #more-messages:not([hidden]) { display: block; margin: 0.75rem auto; }
+#earlier:not([hidden]) { display: block; margin: 0.25rem auto 0.75rem; }
 
 #title { font-size: 1.15rem; margin: 0 0 0.2rem; overflow-wrap: anywhere; }
 #meta { color: var(--dim); font-size: 0.87rem; margin: 0 0 0.6rem; overflow-wrap: anywhere; }
@@ -161,6 +233,21 @@ summary { cursor: pointer; color: var(--dim); }
 .msg a { color: var(--accent); }
 .msg .cut { color: var(--dim); font-size: 0.87rem; }
 .msg button { margin-top: 0.4rem; font-size: 0.87rem; }
+/* The message of a place found, and the call in it. */
+.msg.anchor { background: var(--accent-bg); box-shadow: inset 3px 0 0 var(--accent); padding-left: 0.75rem; padding-right: 0.5rem; }
+.msg .h .match { color: var(--accent); font-weight: 600; }
+/* Thinking and calls are closed at first; a click opens one. */
+.msg .thinking { margin: 0.1rem 0 0.3rem; font-size: 0.9rem; }
+.msg .thinking .text { color: var(--dim); margin: 0.3rem 0 0; padding-left: 0.6rem; border-left: 2px solid var(--line); }
+.msg .calls { list-style: none; margin: 0.5rem 0 0; padding: 0; font-size: 0.87rem; }
+.msg .calls > li { margin: 0.25rem 0; padding: 0.1rem 0 0.1rem 0.6rem; border-left: 2px solid var(--line); }
+.msg .calls > li.failed { border-left-color: var(--warn); }
+.msg .calls > li.anchor { border-left-color: var(--accent); }
+.msg .calls > li.dropped { color: var(--dim); border-left-style: dashed; }
+.msg .calls summary { color: var(--text); overflow-wrap: anywhere; }
+.msg .calls .bad { color: var(--warn); }
+.msg .calls .label { margin: 0.4rem 0 0.1rem; color: var(--dim); font-size: 0.83rem; }
+.msg .calls pre { max-height: 20rem; overflow: auto; margin: 0; }
 
 body.notice main { max-width: 34rem; margin: 3rem auto; padding: 0 1rem; display: block; }
 code { font-family: var(--mono); background: var(--panel); padding: 0.05rem 0.3rem; border-radius: 3px; }

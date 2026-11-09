@@ -1,10 +1,12 @@
 // What the check puts into the page before the page's own script runs. It
 // stands between the page and fetch: it notes every request the page makes,
 // and can hold the answers back to hand them over in a chosen order. The
-// requests themselves leave at once and reach the real node.
+// requests themselves leave at once and reach the real node. With edit set
+// it changes an answer before the page reads it, for a state of a machine
+// that the demo does not reach.
 (() => {
   const real = window.fetch.bind(window);
-  const t = window.__t = { log: [], held: [], hold: false };
+  const t = window.__t = { log: [], held: [], hold: false, edit: null };
 
   window.fetch = (input, init) => {
     const entry = { url: String(input) };
@@ -13,7 +15,7 @@
     entry.read = new Promise(done => { read = done; });
     const answer = real(input, init).then(res => {
       const json = res.json.bind(res);
-      res.json = () => json().finally(read);
+      res.json = () => json().then(v => t.edit ? t.edit(entry.url, v) : v).finally(read);
       return res;
     });
     if (!t.hold) return answer;
@@ -90,5 +92,58 @@
   // clipped: the element shows less than its text.
   t.clipped = e => e.scrollWidth > e.clientWidth;
   t.open = (node, key) => { location.hash = `s=${encodeURIComponent(node)}/${encodeURIComponent(key)}`; };
+  // at opens a session at a place in it, as an address the page made does.
+  t.at = (node, key, id, rev, call) => {
+    location.hash = `s=${encodeURIComponent(node)}/${encodeURIComponent(key)}&at=${id}&rev=${rev}` +
+      (call === undefined ? '' : `&call=${call}`);
+  };
   t.withCursor = from => t.log.slice(from).filter(url => new URL(url).searchParams.get('after') > '0');
+
+  // The search. found asks the node itself for one, and names what it
+  // found the way places shows those on the page: node/key#id, and .call
+  // for a call.
+  const name = (node, key, id, call) => `${node}/${key}#${id}` + (call === undefined ? '' : `.${call}`);
+  t.found = async query => {
+    const r = await get(`/api/v1/sessions/search?${query}`);
+    const places = r.sessions ? r.sessions.map(g => name(g.node_id, g.key, g.first))
+      : r.hits.map(h => name(h.node_id, h.key, h.id, h.call));
+    return { places, more: r.more, hits: r.hits };
+  };
+  t.places = () => [...document.querySelectorAll('#hits > li')].map(li =>
+    name(li.dataset.node, li.dataset.key, li.dataset.at, li.dataset.call));
+  // states is what the page says of each machine: how it was searched, and
+  // "+partial" when it says that what came from there is incomplete.
+  t.states = () => Object.fromEntries([...document.querySelectorAll('#search-nodes [data-searched]')].map(e =>
+    [e.dataset.node, e.dataset.searched + (e.dataset.partial ? '+partial' : '')]));
+  // type puts text into a field, as typing does; submit sends the search
+  // form, as Enter does. Both return how many requests the page made.
+  t.type = (id, text) => {
+    const before = t.log.length;
+    const e = document.getElementById(id);
+    e.value = text;
+    e.dispatchEvent(new Event('input', { bubbles: true }));
+    return t.log.length - before;
+  };
+  t.submit = () => {
+    const before = t.log.length;
+    document.getElementById('search').requestSubmit();
+    return t.log.length - before;
+  };
+  // choose is a reader's click on a place found.
+  t.choose = place => [...document.querySelectorAll('#hits > li')].find(li =>
+    name(li.dataset.node, li.dataset.key, li.dataset.at, li.dataset.call) === place).click();
+  t.searched = () => !document.getElementById('s-go').disabled && document.getElementById('search-note').textContent !== '';
+  // anchor is the message marked as a place found: its number, the calls
+  // marked in it and whether they are open.
+  t.anchor = () => {
+    const a = document.querySelector('#messages > article.anchor');
+    if (!a) return null;
+    return {
+      seq: a.querySelector('.h > span:nth-child(2)').textContent,
+      badge: (a.querySelector('.h .match') || {}).textContent || '',
+      calls: [...a.querySelectorAll('.calls > li.anchor')].map(li => Number(li.dataset.call)),
+      open: [...a.querySelectorAll('.calls > li.anchor > details')].every(d => d.open),
+      inView: t.inView(a.querySelector('.h')),
+    };
+  };
 })();

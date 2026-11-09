@@ -20,17 +20,58 @@
       <p id="machines-note" hidden></p>
       <ul id="machines"></ul>
     </details>
-    <form id="filters">
-      <input id="q" type="search" autocomplete="off">
-      <select id="node"></select>
-      <input id="agent" type="text" list="agents" autocomplete="off">
-      <datalist id="agents"></datalist>
-      <input id="project" type="text" autocomplete="off">
-      <select id="since"></select>
-    </form>
-    <p id="list-note" hidden></p>
-    <ol id="list"></ol>
-    <button id="more" type="button" hidden></button>
+    <nav id="modes">
+      <button id="mode-list" type="button"></button>
+      <button id="mode-search" type="button"></button>
+    </nav>
+    <div id="list-view">
+      <form id="filters">
+        <input id="q" type="search" autocomplete="off">
+        <select id="node"></select>
+        <input id="agent" type="text" list="agents" autocomplete="off">
+        <datalist id="agents"></datalist>
+        <input id="project" type="text" autocomplete="off">
+        <select id="since"></select>
+      </form>
+      <p id="list-note" hidden></p>
+      <ol id="list"></ol>
+      <button id="more" type="button" hidden></button>
+    </div>
+    <div id="search-view" hidden>
+      <form id="search">
+        <input id="s-q" type="search" autocomplete="off" spellcheck="false">
+        <input id="s-file" type="text" autocomplete="off" spellcheck="false">
+        <select id="s-node"></select>
+        <input id="s-agent" type="text" list="agents" autocomplete="off">
+        <input id="s-project" type="text" autocomplete="off">
+        <select id="s-when"></select>
+        <div id="s-range" hidden>
+          <label><span id="s-from-label"></span><input id="s-from" type="date"></label>
+          <label><span id="s-to-label"></span><input id="s-to" type="date"></label>
+        </div>
+        <details id="s-more">
+          <summary id="s-more-title"></summary>
+          <div class="fields">
+            <label><span id="s-op-label"></span><select id="s-op"></select></label>
+            <label class="check"><input id="s-failed" type="checkbox"><span id="s-failed-label"></span></label>
+            <input id="s-tool" type="text" autocomplete="off" spellcheck="false">
+            <select id="s-kind"></select>
+            <label class="check"><input id="s-error" type="checkbox"><span id="s-error-label"></span></label>
+          </div>
+        </details>
+        <div class="actions">
+          <label class="check"><input id="s-group" type="checkbox"><span id="s-group-label"></span></label>
+          <button id="s-go" type="submit"></button>
+        </div>
+      </form>
+      <p id="search-note"></p>
+      <ul id="search-nodes" hidden></ul>
+      <ol id="hits"></ol>
+      <div id="search-more" hidden>
+        <p id="search-more-note"></p>
+        <button id="search-wider" type="button"></button>
+      </div>
+    </div>
   </section>
   <section id="reader">
     <p id="reader-empty"></p>
@@ -38,6 +79,7 @@
       <h2 id="title"></h2>
       <p id="meta"></p>
       <div id="notes"></div>
+      <button id="earlier" type="button" hidden></button>
       <div id="messages"></div>
       <button id="more-messages" type="button" hidden></button>
     </div>
