@@ -98,7 +98,7 @@ A machine without Wake still lists and reads the sessions of the others. The ind
 
 ## Web
 
-The same sessions in a browser: the machines, the list with filters and search, and a session to read. Read-only.
+The same sessions in a browser: the machines, the list with filters, a search of every machine, and a session to read with the calls under each message. Read-only.
 
 ```sh
 h8c web     # prints a link; open it in a browser on this machine
@@ -109,6 +109,10 @@ h8c web     # prints a link; open it in a browser on this machine
 The page shows private data, so it does not open by itself. The link from `h8c web` carries a token, kept in the data directory (`web.token`, readable by you only). The first time, the page trades the token for a cookie and goes on to an address without it; after that the cookie is enough for a month. A browser without it only gets a note telling you to run `h8c web`. To lock every browser out, stop the node, delete `web.token` and start it again.
 
 The page needs no network and loads nothing from elsewhere.
+
+**Search** is the page's view of `h8c search`: words in messages, thinking and the input of calls (words in quotes stay together), a file, an agent, a project, a machine, a time or a range of dates, and under "more conditions" the operation on the file, failed attempts, the tool, the kind of message and failed calls only. It lists each place found with its session, machine, project, time and the text around the match, and for a call its tool and files; or, grouped, each session with its number of matches. Above the places it says how each machine was searched: live, only in the copies kept on this machine, or not at all, and whether what it gave is incomplete. When more was found than is listed it says so; narrow the search, or show up to 500. A place found opens its session there: the message marked, with ten messages before and after it, earlier and later ones a click away, and a note when the session has changed since the search so that the place may have moved.
+
+Under a message are its calls: the tool, whether it failed, and the files it was given with what was done to them. Input and output, and the thinking that went with the message, are folded away until clicked.
 
 ### Removing a machine
 
@@ -185,4 +189,4 @@ h8c search --file store.go --op any --failed --json
 h8c show desk/codex:example --around 41 --rev 7 --before 8 --after 2 --json
 ```
 
-Search supports `--tool`, `--kind`, `--errors`, `--agent`, `--project`, `--node`, `--since`, `--until`, and `--limit` (up to 500). Terms are literal text. Every hit has a message id and revision; each node reports live, copies or none. `partial` means the body or required structure was not searched completely; budget exhaustion retains already found hits. Pure Wake filters scan recent session batches; an unreadable ACP session is skipped with a counted note. `scanned_since` separately reports thinking/full-input coverage; a side-only row or time limit after indexed body completion does not make the query partial. `--errors --file` includes failed attempts, and date-only `--until` includes that entire day. `--by-session` counts hits before limiting groups. Old copies without a file-structure declaration make file/op queries partial, with affected-session counts in the note. `h8c show KEY` resolves a unique indexed key without a node name. Around compares the revision of the data actually read and exposes `has_before`; `show --all` includes meta messages. See [search semantics, limits and API fields](docs/design.md#search-and-anchors). The page search UI and agent skill are separate work.
+Search supports `--tool`, `--kind`, `--errors`, `--agent`, `--project`, `--node`, `--since`, `--until`, and `--limit` (up to 500). Terms are literal text. Every hit has a message id and revision; each node reports live, copies or none. `partial` means the body or required structure was not searched completely; budget exhaustion retains already found hits. Pure Wake filters scan recent session batches; an unreadable ACP session is skipped with a counted note. `scanned_since` separately reports thinking/full-input coverage; a side-only row or time limit after indexed body completion does not make the query partial. `--errors --file` includes failed attempts, and date-only `--until` includes that entire day. `--by-session` counts hits before limiting groups. Old copies without a file-structure declaration make file/op queries partial, with affected-session counts in the note. `h8c show KEY` resolves a unique indexed key without a node name. Around compares the revision of the data actually read and exposes `has_before`; `show --all` includes meta messages. See [search semantics, limits and API fields](docs/design.md#search-and-anchors). The page has the same search; the agent skill is separate work.
