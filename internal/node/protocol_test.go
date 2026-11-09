@@ -491,7 +491,7 @@ func TestProtocol1SearchRouteAndOldPeer404(t *testing.T) {
 	if err := laptop.control("/v1/sessions/search?node=desk", &result); err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Nodes) != 1 || result.Nodes[0].Searched != "copies" || !result.Nodes[0].Partial || remote.requests("/v1/sessions/search") != 1 {
+	if len(result.Nodes) != 1 || result.Nodes[0].Searched != "copies" || result.Nodes[0].Partial || remote.requests("/v1/sessions/search") != 1 {
 		t.Fatal(result)
 	}
 	// A recorded new answer must also be produced by the actual peer handler.
@@ -507,7 +507,7 @@ func TestProtocol1SearchRouteAndOldPeer404(t *testing.T) {
 	desk.trust(laptop)
 	laptop.trust(desk)
 	h := want.Hits[0]
-	desk.sessions.Source = &structuredProtocolSource{list: []sessions.Session{{Key: h.Key, Agent: "codex", Title: h.Title, Project: h.Project, UpdatedAt: h.UpdatedAt, Structure: 2}}, messages: []sessions.Message{{ID: h.ID, Seq: 1, Time: h.Time, Kind: h.Kind, Calls: []sessions.Call{{Tool: h.Tool, Input: h.Snippet, Files: h.Files}}}}}
+	desk.sessions.Source = &structuredProtocolSource{list: []sessions.Session{{Key: h.Key, Agent: "codex", Title: h.Title, Project: h.Project, UpdatedAt: h.UpdatedAt, Messages: 1, Structure: 2}}, messages: []sessions.Message{{ID: h.ID, Seq: 1, Time: h.Time, Kind: h.Kind, Calls: []sessions.Call{{Tool: h.Tool, Input: h.Snippet, Files: h.Files}}}}}
 	desk.sessions.SyncLocal(context.Background())
 	var got sessions.LocalSearchResult
 	if _, err = laptop.client.Get(context.Background(), desk.addr, "/v1/sessions/search?file=sessions%2Fstore.go", &got, sessions.MaxReply); err != nil {

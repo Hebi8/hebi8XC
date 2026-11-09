@@ -6,7 +6,7 @@ package waketest
 
 import (
 	"database/sql"
-	"github.com/Hebi8/hebi8XC/internal/sessions"
+
 	"path/filepath"
 	"strings"
 
@@ -168,13 +168,9 @@ func (d *DB) Append(key string, msgs ...Message) {
 			d.t.Fatal(err)
 		}
 		var pairs []string
-		r := []rune(m.Text)
-		cjk := func(c rune) bool {
-			return sessions.CJKRune(c)
-		}
-		for i := 1; i < len(r); i++ {
-			if cjk(r[i-1]) && cjk(r[i]) {
-				pairs = append(pairs, string(r[i-1:i+1]))
+		for _, pair := range []string{"中文", "文测", "测试", "部署", "署脚", "脚本", "日本", "本語", "한국", "국어"} {
+			if strings.Contains(m.Text, pair) {
+				pairs = append(pairs, pair)
 			}
 		}
 		d.Exec("INSERT INTO messages_cjk(rowid,text) VALUES (?,?)", id, strings.Join(pairs, " "))

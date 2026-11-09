@@ -31,8 +31,9 @@ import (
 // Sessions of this machine and of others share one table, told apart by the
 // node id, so a listing is one query.
 type Store struct {
-	db  *sql.DB
-	now func() time.Time
+	path string
+	db   *sql.DB
+	now  func() time.Time
 	// Serialize local refreshes with export initialization and acknowledgement.
 	exportMu sync.Mutex
 }
@@ -124,7 +125,7 @@ func OpenStore(path string, now func() time.Time) (*Store, error) {
 	// One connection: every operation is short, and none can then find the
 	// database locked by another.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: now}
+	s := &Store{db: db, now: now, path: path}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -458,12 +459,6 @@ type Listed struct {
 	Session
 }
 
-// like turns text into a LIKE pattern that matches it anywhere, literally.
-func like(text string) string {
-	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-	return "%" + r.Replace(text) + "%"
-}
-
 // List returns the sessions of all nodes that match q, most recently
 // updated first.
 func (s *Store) List(ctx context.Context, q Query) ([]Listed, error) {
@@ -479,7 +474,7 @@ func (s *Store) List(ctx context.Context, q Query) ([]Listed, error) {
 	}
 	if q.Project != "" {
 		where = append(where, `(project LIKE ? ESCAPE '\' OR project_path LIKE ? ESCAPE '\')`)
-		args = append(args, like(q.Project), like(q.Project))
+		args = append(args, Like(q.Project), Like(q.Project))
 	}
 	if q.Since > 0 {
 		where = append(where, "updated_at >= ?")
@@ -487,7 +482,7 @@ func (s *Store) List(ctx context.Context, q Query) ([]Listed, error) {
 	}
 	for _, text := range q.Text {
 		where = append(where, `(title LIKE ? ESCAPE '\' OR project LIKE ? ESCAPE '\')`)
-		args = append(args, like(text), like(text))
+		args = append(args, Like(text), Like(text))
 	}
 	if q.After != "" {
 		p, err := parsePosition(q.After)

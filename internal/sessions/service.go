@@ -610,12 +610,14 @@ func lessNode(a, b Node) bool {
 
 // Reading is a page of a session, with where it came from.
 type Reading struct {
-	Rev      int64     `json:"rev"`
-	CopyRev  int64     `json:"copy_rev,omitempty"`
-	Moved    bool      `json:"moved,omitempty"`
-	Format   int       `json:"format,omitempty"`
-	Session  Entry     `json:"session"`
-	Messages []Message `json:"messages"`
+	HasBefore bool      `json:"has_before"`
+	Partial   bool      `json:"partial,omitempty"`
+	Rev       int64     `json:"rev"`
+	CopyRev   int64     `json:"copy_rev,omitempty"`
+	Moved     bool      `json:"moved,omitempty"`
+	Format    int       `json:"format,omitempty"`
+	Session   Entry     `json:"session"`
+	Messages  []Message `json:"messages"`
 	// Next is the --after value of the next page, 0 on the last one.
 	Next int64 `json:"next"`
 	// From is "local" for a session of this machine, "peer" when the
@@ -675,9 +677,50 @@ func Code(err error) string {
 // Read returns a page of the session key on the node named node: messages
 // with an ID above after, at most limit.
 func (s *Service) Read(ctx context.Context, node, key string, after int64, limit int) (Reading, error) {
+	return s.read(ctx, node, key, after, limit, 0)
+}
+
+func (s *Service) read(ctx context.Context, node, key string, after int64, limit int, wantRev int64) (Reading, error) {
 	nodes, err := s.nodes(ctx)
 	if err != nil {
 		return Reading{}, err
+	}
+	if node == "" {
+		rows, e := s.Store.db.QueryContext(ctx, "SELECT node FROM sessions WHERE key=? AND deleted=0 ORDER BY node", key)
+		if e != nil {
+			return Reading{}, e
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if e = rows.Scan(&id); e != nil {
+				break
+			}
+			ids = append(ids, id)
+		}
+		re := rows.Err()
+		rows.Close()
+		if e != nil {
+			return Reading{}, e
+		}
+		if re != nil {
+			return Reading{}, re
+		}
+		if len(ids) == 0 {
+			return Reading{}, fmt.Errorf("%w: key %q", ErrNotFound, key)
+		}
+		if len(ids) > 1 {
+			refs := make([]string, 0, len(ids))
+			for _, id := range ids {
+				n := nodes[id]
+				if n == nil {
+					n = &Node{ID: id}
+				}
+				refs = append(refs, ref(n, nodes, key))
+			}
+			return Reading{}, fmt.Errorf("several nodes have this key; use one of: %s", strings.Join(refs, ", "))
+		}
+		node = ids[0]
 	}
 	n, err := resolve(nodes, node)
 	if err != nil {
@@ -704,13 +747,13 @@ func (s *Service) Read(ctx context.Context, node, key string, after int64, limit
 		}
 		out.Format = messageFormat(msgs)
 	} else {
-		cp, err := s.copyOf(ctx, n, key, rev, &out)
+		cp, err := s.copyOf(ctx, n, key, max(rev, wantRev), &out)
 		if err != nil {
 			return Reading{}, err
 		}
 		out.Format = cp.Format
 		out.CopyRev = cp.Rev
-		out.Rev = max(out.Rev, cp.Rev)
+		out.Rev = cp.Rev
 		if msgs, more, err = s.Store.CachedMessages(ctx, n.ID, key, cp, after, limit, PageBudget); err != nil {
 			return Reading{}, err
 		}

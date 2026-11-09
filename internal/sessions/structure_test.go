@@ -100,7 +100,7 @@ func removeStructureSchema(t *testing.T, store *Store) {
 	for _, q := range []string{
 		"DROP TRIGGER search_messages_insert", "DROP TRIGGER search_messages_replace", "DROP TRIGGER search_messages_update", "DROP TRIGGER search_messages_delete",
 		"DROP TABLE search_fts", "DROP TABLE search_docs", "DROP TABLE search_files",
-		"DELETE FROM meta WHERE k='schema'",
+		"DELETE FROM meta WHERE k IN ('schema','search_schema')",
 		"ALTER TABLE sessions DROP COLUMN tokens", "ALTER TABLE sessions DROP COLUMN files", "ALTER TABLE sessions DROP COLUMN structure",
 		"DROP TABLE export_log", "DROP TABLE export_state", "DROP TABLE export_scan", "DROP TABLE export_messages",
 		"ALTER TABLE sessions DROP COLUMN app", "ALTER TABLE sessions DROP COLUMN reader", "ALTER TABLE sessions DROP COLUMN tool_calls", "ALTER TABLE sessions DROP COLUMN tool_errors",

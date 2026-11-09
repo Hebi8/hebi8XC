@@ -238,16 +238,34 @@ func showSession(dir string, args []string, out io.Writer) error {
 		return err
 	}
 	if len(rest) != 1 {
-		return errors.New("want: h8c show NODE/KEY, as in the first column of h8c sessions")
+		return errors.New("want: h8c show [NODE/]KEY; omit NODE only when the key is unique")
 	}
 	nodeName, key, ok := strings.Cut(rest[0], "/")
-	if !ok || nodeName == "" || key == "" {
+	if !ok {
+		nodeName, key = "", rest[0]
+	}
+	if key == "" {
 		return fmt.Errorf("%q is not NODE/KEY", rest[0])
 	}
 	q := url.Values{"node": {nodeName}, "key": {key},
 		"after": {strconv.FormatInt(*after, 10)}, "limit": {strconv.Itoa(*limit)}}
 
-	if *around != 0 {
+	hasAround, hasRev := false, false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "around" {
+			hasAround = true
+		}
+		if f.Name == "rev" {
+			hasRev = true
+		}
+	})
+	if hasAround && *around <= 0 {
+		return errors.New("--around requires a positive message id")
+	}
+	if hasRev && !hasAround {
+		return errors.New("--rev requires --around")
+	}
+	if hasAround {
 		q.Set("around", strconv.FormatInt(*around, 10))
 		q.Set("before", strconv.Itoa(*before))
 		q.Set("after", "2")

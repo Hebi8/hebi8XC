@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/control"
@@ -46,6 +45,11 @@ func searchSessions(dir string, args []string, out io.Writer) error {
 			if e != nil {
 				return fmt.Errorf("--%s: invalid date or duration", label)
 			}
+			if label == "until" {
+				if date, e := time.ParseInLocation(time.DateOnly, v.text, time.Local); e == nil {
+					t = date.AddDate(0, 0, 1).Add(-time.Millisecond)
+				}
+			}
 			*v.dst = t.UnixMilli()
 		}
 	}
@@ -53,9 +57,11 @@ func searchSessions(dir string, args []string, out io.Writer) error {
 		return err
 	}
 	v := q.Values()
-	v.Set("node", q.Node)
-	v.Set("by_session", strconv.FormatBool(q.BySession))
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if q.Node != "" {
+		v.Set("node", q.Node)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
 	defer cancel()
 	var r sessions.SearchResult
 	if err := control.Dial(filepath.Join(dir, node.ControlSocket)).Get(ctx, "/v1/sessions/search?"+v.Encode(), &r); err != nil {

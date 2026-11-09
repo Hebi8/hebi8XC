@@ -66,11 +66,10 @@ func (s *Service) ReadRoutes(mux *http.ServeMux) {
 		})
 		answer(w, list, err)
 	})
-	mux.Handle("GET /v1/sessions/messages", http.TimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/sessions/messages", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
+		ctx := r.Context()
 		var reading Reading
 		var err error
 		if q.Has("around") {
@@ -102,7 +101,7 @@ func (s *Service) ReadRoutes(mux *http.ServeMux) {
 			w.Header().Set(ErrorHeader, code)
 		}
 		answer(w, reading, err)
-	}), 10*time.Second, "session read exceeded ten seconds; narrow the window"))
+	})
 }
 
 func answer(w http.ResponseWriter, v any, err error) {
@@ -124,7 +123,7 @@ func answer(w http.ResponseWriter, v any, err error) {
 }
 
 func (s *Service) searchRoute(mux *http.ServeMux, local bool) {
-	mux.Handle("GET /v1/sessions/search", http.TimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/sessions/search", func(w http.ResponseWriter, r *http.Request) {
 		q, err := ParseSearch(r.URL.Query())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -139,5 +138,5 @@ func (s *Service) searchRoute(mux *http.ServeMux, local bool) {
 			pg, err := s.Search(ctx, q)
 			answer(w, pg, err)
 		}
-	}), 10*time.Second, "search exceeded ten seconds; narrow the query"))
+	})
 }

@@ -75,7 +75,7 @@ func TestSearchCopyFormatsAndMaintenance(t *testing.T) {
 	desk.online = false
 	for _, term := range []string{"AND", "中文", "js"} {
 		r, e := laptop.Search(ctx, SearchQuery{Terms: []string{term}, Node: "desk", Limit: 50})
-		if e != nil || len(r.Hits) != 1 || !r.Nodes[0].Partial {
+		if e != nil || len(r.Hits) != 1 || r.Nodes[0].Partial {
 			t.Fatal(r, e)
 		}
 	}
@@ -104,7 +104,7 @@ func TestSearchBackfillAndSchema2Rollback(t *testing.T) {
 	desk.src.put("codex:plain", "Plain", 1000, "backfill needle")
 	net.sync()
 	laptop.readAll("desk", "codex:plain", 50)
-	for _, sql := range []string{"DROP TRIGGER search_messages_insert", "DROP TRIGGER search_messages_replace", "DROP TRIGGER search_messages_update", "DROP TRIGGER search_messages_delete", "DROP TABLE search_fts", "DROP TABLE search_docs", "DROP TABLE search_files"} {
+	for _, sql := range []string{"DELETE FROM meta WHERE k='search_schema'", "DROP TRIGGER search_messages_insert", "DROP TRIGGER search_messages_replace", "DROP TRIGGER search_messages_update", "DROP TRIGGER search_messages_delete", "DROP TABLE search_fts", "DROP TABLE search_docs", "DROP TABLE search_files"} {
 		if _, e := laptop.Store.db.Exec(sql); e != nil {
 			t.Fatal(e)
 		}
@@ -184,6 +184,11 @@ func (s blockedSearchSource) Sessions(ctx context.Context) ([]Session, error) {
 	<-s.release
 	return s.Source.Sessions(ctx)
 }
+func (s blockedSearchSource) Search(ctx context.Context, q SearchQuery) (LocalSearchResult, error) {
+	<-s.release
+	return ScanSearch(ctx, s.Source, q)
+}
+
 func TestSearchHTTPDeadline(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		desk, _, _ := pair(t)
@@ -195,7 +200,7 @@ func TestSearchHTTPDeadline(t *testing.T) {
 		start := time.Now()
 		mux.ServeHTTP(w, httptest.NewRequest("GET", "/v1/sessions/search?node=desk", nil))
 		close(release)
-		if w.Code != http.StatusServiceUnavailable || time.Since(start) != 10*time.Second {
+		if w.Code != http.StatusOK || time.Since(start) != 10*time.Second {
 			t.Fatal(w.Code, time.Since(start))
 		}
 	})

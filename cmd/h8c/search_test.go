@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"github.com/Hebi8/hebi8XC/internal/sessions/wake/waketest"
 	"testing"
+	"time"
 
 	"github.com/Hebi8/hebi8XC/internal/sessions"
 )
@@ -42,4 +45,24 @@ func TestSearchCommandAndAround(t *testing.T) {
 		}
 	}
 
+}
+
+func TestSearchUntilIncludesWholeDayAndShowKey(t *testing.T) {
+	desk, laptop, fixture := twoMachines(t)
+	day := time.Date(2026, 10, 1, 0, 0, 0, 0, time.Local)
+	fixture.Put(waketest.Session{Key: "claude:a1", Agent: "claude", UpdatedAt: day.UnixMilli()}, waketest.Message{Text: "needle", Time: day.Add(23 * time.Hour).UnixMilli()}, waketest.Message{Text: "needle", Time: day.AddDate(0, 0, 1).UnixMilli()})
+	var r sessions.SearchResult
+	if e := json.Unmarshal([]byte(h8c(t, desk, "search", "needle", "--until", "2026-10-01", "--json")), &r); e != nil || len(r.Hits) != 1 {
+		t.Fatal(r, e)
+	}
+	var read sessions.Reading
+	if e := json.Unmarshal([]byte(h8c(t, laptop, "show", "claude:a1", "--json")), &read); e != nil || read.Session.Ref != "desk/claude:a1" {
+		t.Fatal(read, e)
+	}
+	for _, args := range [][]string{{"show", "claude:a1", "--around", "0"}, {"show", "claude:a1", "--rev", "1"}} {
+		var out bytes.Buffer
+		if e := run(append([]string{"--data-dir", desk}, args...), &out); e == nil {
+			t.Fatal(args)
+		}
+	}
 }

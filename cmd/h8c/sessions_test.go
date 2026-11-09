@@ -235,11 +235,11 @@ func TestShowCommand(t *testing.T) {
 	}
 
 	for args, want := range map[string]string{
-		"nonsense":           "is not NODE/KEY",
-		"":                   "want: h8c show NODE/KEY",
+		"nonsense":           "no such session",
+		"":                   "want: h8c show [NODE/]KEY",
 		"desk/claude:zzz":    "no such session",
 		"nobody/claude:a1":   `no node "nobody"`,
-		"desk/claude:a1 x y": "want: h8c show NODE/KEY",
+		"desk/claude:a1 x y": "want: h8c show [NODE/]KEY",
 	} {
 		if err := h8cFails(t, laptop, append([]string{"show"}, strings.Fields(args)...)...); !strings.Contains(err.Error(), want) {
 			t.Errorf("h8c show %s: %v, want %q", args, err, want)

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 )
@@ -16,7 +17,9 @@ import (
 // SearchQuery contains literal terms, never FTS syntax. Since/Until are message
 // timestamps (milliseconds); messages without a timestamp use session UpdatedAt.
 type SearchQuery struct {
-	ExcludeKeys                                []string // Combined suppresses native ACP duplicates before limiting Wake hits.
+	LocalSessions                              []Session        // service metadata snapshot avoids reopening ACP databases for search listing
+	AllowedKeys                                map[string]int64 // local feed snapshot; nil means unrestricted
+	ExcludeKeys                                []string         // Combined suppresses native ACP duplicates before limiting Wake hits.
 	Terms                                      []string
 	File, Op, Tool, Kind, Agent, Project, Node string
 	Failed, Errors, BySession                  bool
@@ -29,7 +32,10 @@ const SearchCandidates = 10000
 var ErrSearchBound = errors.New("search exceeded its work or time limit; narrow the project, file or time range")
 
 func (q *SearchQuery) Validate() error {
-	q.File = strings.TrimPrefix(strings.ReplaceAll(q.File, `\`, "/"), "./")
+	q.File = NormalizePath(q.File)
+	if q.Errors && q.File != "" {
+		q.Failed = true
+	}
 	if len(q.Terms) > 32 {
 		return errors.New("search accepts at most 32 terms; narrow the query")
 	}
@@ -79,7 +85,13 @@ func ParseSearch(v url.Values) (SearchQuery, error) {
 	return q, q.Validate()
 }
 func (q SearchQuery) Values() url.Values {
-	v := url.Values{"q": q.Terms, "limit": {strconv.Itoa(q.Limit)}}
+	v := url.Values{}
+	if len(q.Terms) > 0 {
+		v["q"] = q.Terms
+	}
+	if q.Limit > 0 {
+		v.Set("limit", strconv.Itoa(q.Limit))
+	}
 	for k, x := range map[string]string{"file": q.File, "op": q.Op, "tool": q.Tool, "kind": q.Kind, "agent": q.Agent, "project": q.Project} {
 		if x != "" {
 			v.Set(k, x)
@@ -127,14 +139,74 @@ func CJKPair(t string) bool {
 func CJKRune(c rune) bool {
 	return unicode.IsLetter(c) && ((c >= 0x3040 && c <= 0x30ff) || (c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xac00 && c <= 0xd7af) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0x20000 && c <= 0x323af))
 }
-func LikeLiteral(t string) string { return like(t) }
+func NormalizePath(p string) string {
+	p = strings.ReplaceAll(p, `\`, "/")
+	for strings.HasPrefix(p, "./") {
+		p = strings.TrimPrefix(p, "./")
+	}
+	if len(p) > 1 && p[1] == ':' {
+		p = strings.ToLower(p[:1]) + p[1:]
+	}
+	return p
+}
 func FileMatch(path, query string) bool {
-	path = strings.ReplaceAll(path, `\`, "/")
-	query = strings.ReplaceAll(query, `\`, "/")
+	path, query = NormalizePath(path), NormalizePath(query)
 	absolute := strings.HasPrefix(query, "/") || (len(query) > 1 && query[1] == ':')
-	return path == query || (!absolute && strings.HasSuffix(path, "/"+strings.TrimPrefix(query, "./")))
+	return path == query || (!absolute && strings.HasSuffix(path, "/"+query))
+}
+
+// Like escapes a literal substring; it is shared by the two SQL readers.
+func Like(t string) string { return "%" + EscapeLike(t) + "%" }
+func EscapeLike(t string) string {
+	return strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(t)
+}
+
+// FileSQL uses separator-aligned suffixes. Only the Windows drive letter folds.
+func FileSQL(column, path string) (string, []any) {
+	path = NormalizePath(path)
+	norm := "replace(" + column + ",char(92),'/')"
+	norm = "(CASE WHEN substr(" + norm + ",2,1)=':' THEN lower(substr(" + norm + ",1,1))||substr(" + norm + ",2) ELSE " + norm + " END)"
+	if strings.HasPrefix(path, "/") || (len(path) > 1 && path[1] == ':') {
+		return norm + "=?", []any{path}
+	}
+	return "(" + norm + "=? OR substr(" + norm + ",-(length(?)+1))='/'||?)", []any{path, path, path}
+}
+func (q SearchQuery) CallFilter() bool { return q.File != "" || q.Tool != "" || q.Errors }
+func (q SearchQuery) OpSQL(column string) (string, []any) {
+	if q.Op == "any" {
+		return "1", nil
+	}
+	if q.Op == "" {
+		return column + " IN ('change','delete')", nil
+	}
+	return column + "=?", []any{q.Op}
+}
+func (r *LocalSearchResult) Bound(through int64) {
+	r.Partial = true
+	text := "search budget reached; results are incomplete; narrow the project, file or time range"
+	if through > 0 {
+		text = "searched newest messages through " + time.UnixMilli(through).UTC().Format(time.RFC3339) + "; " + text
+	}
+	r.Note = JoinNote(r.Note, text)
+}
+func JoinNote(a, b string) string {
+	if a == "" {
+		return b
+	}
+	if b == "" || strings.Contains(a, b) {
+		return a
+	}
+	return a + "; " + b
+}
+func SearchInterrupted(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrSearchBound)
 }
 func (q SearchQuery) SessionMatch(s Session) bool {
+	if q.AllowedKeys != nil {
+		if _, ok := q.AllowedKeys[s.Key]; !ok {
+			return false
+		}
+	}
 	return !slices.Contains(q.ExcludeKeys, s.Key) && (q.Agent == "" || s.Agent == q.Agent) && (q.Project == "" || strings.Contains(strings.ToLower(s.Project+"\n"+s.ProjectPath), strings.ToLower(q.Project)))
 }
 func (q SearchQuery) TimeMatch(m Message, s Session) bool {
@@ -159,21 +231,23 @@ func (q SearchQuery) textMatch(text string) bool {
 
 // SearchHit always names a message; Call is the zero-based call index when set.
 type SearchHit struct {
-	Ref       string `json:"ref"`
-	Key       string `json:"key"`
-	Node      string `json:"node"`
-	NodeID    string `json:"node_id"`
-	ID        int64  `json:"id"`
-	Rev       int64  `json:"rev"`
-	Call      *int   `json:"call,omitempty"`
-	Time      int64  `json:"time"`
-	Kind      string `json:"kind,omitempty"`
-	Tool      string `json:"tool,omitempty"`
-	Snippet   string `json:"snippet"`
-	Files     []File `json:"files,omitempty"`
-	Title     string `json:"title"`
-	Project   string `json:"project"`
-	UpdatedAt int64  `json:"updated_at"`
+	Agent       string `json:"agent,omitempty"`
+	ProjectPath string `json:"project_path,omitempty"`
+	Ref         string `json:"ref"`
+	Key         string `json:"key"`
+	Node        string `json:"node"`
+	NodeID      string `json:"node_id"`
+	ID          int64  `json:"id"`
+	Rev         int64  `json:"rev"`
+	Call        *int   `json:"call,omitempty"`
+	Time        int64  `json:"time"`
+	Kind        string `json:"kind,omitempty"`
+	Tool        string `json:"tool,omitempty"`
+	Snippet     string `json:"snippet"`
+	Files       []File `json:"files,omitempty"`
+	Title       string `json:"title"`
+	Project     string `json:"project"`
+	UpdatedAt   int64  `json:"updated_at"`
 }
 type SearchSession struct {
 	Key       string `json:"key"`
@@ -229,10 +303,10 @@ func MatchMessage(q SearchQuery, s Session, m Message) []SearchHit {
 	if !q.TimeMatch(m, s) || (q.Kind != "" && m.Kind != q.Kind) {
 		return nil
 	}
-	base := SearchHit{Key: s.Key, ID: m.ID, Time: m.Time, Kind: m.Kind, Title: s.Title, Project: s.Project, UpdatedAt: s.UpdatedAt}
+	base := SearchHit{Agent: s.Agent, ProjectPath: s.ProjectPath, Key: s.Key, ID: m.ID, Time: m.Time, Kind: m.Kind, Title: s.Title, Project: s.Project, UpdatedAt: s.UpdatedAt}
 	body := q.textMatch(m.Text)
 	thinking := m.Thinking != "" && q.textMatch(m.Thinking)
-	callFilter := q.File != "" || q.Tool != "" || q.Errors
+	callFilter := q.CallFilter()
 	var out []SearchHit
 	if !callFilter && (body || thinking) {
 		h := base
@@ -248,7 +322,7 @@ func MatchMessage(q SearchQuery, s Session, m Message) []SearchHit {
 			continue
 		}
 		if q.File != "" {
-			if c.Error && !q.Failed {
+			if c.Error && !q.Failed && !q.Errors {
 				continue
 			}
 			found := false
@@ -324,6 +398,21 @@ func FinishSearch(r LocalSearchResult, q SearchQuery) LocalSearchResult {
 		if len(r.Hits) > 0 {
 			r.Sessions = append(r.Sessions, groupHits(r.Hits)...)
 		}
+		merged := make([]SearchSession, 0, len(r.Sessions))
+		positions := map[string]int{}
+		for _, g := range r.Sessions {
+			key := g.NodeID + "/" + g.Key
+			if i, ok := positions[key]; ok {
+				v := &merged[i]
+				v.Hits += g.Hits
+				v.First = min(v.First, g.First)
+				v.Last = max(v.Last, g.Last)
+			} else {
+				positions[key] = len(merged)
+				merged = append(merged, g)
+			}
+		}
+		r.Sessions = merged
 		slices.SortFunc(r.Sessions, func(a, b SearchSession) int {
 			return cmp.Or(cmp.Compare(b.UpdatedAt, a.UpdatedAt), cmp.Compare(a.Key, b.Key))
 		})
@@ -353,44 +442,67 @@ func FinishSearch(r LocalSearchResult, q SearchQuery) LocalSearchResult {
 	return r
 }
 
-// ScanSearch is the ACP path: no persisted local messages, bounded traversal.
-func ScanSearch(ctx context.Context, source Source, q SearchQuery) (LocalSearchResult, error) {
-	list, err := source.Sessions(ctx)
-	if err != nil {
-		return LocalSearchResult{}, err
+// ScanSearch scans recent ACP sessions without storing local message rows.
+func ScanSearch(ctx context.Context, source Source, q SearchQuery) (out LocalSearchResult, err error) {
+	var through int64
+	defer func() {
+		if SearchInterrupted(ctx, err) {
+			out.Bound(through)
+			err = nil
+		}
+		out = FinishSearch(out, q)
+	}()
+	list := q.LocalSessions
+	if list == nil {
+		list, err = source.Sessions(ctx)
+		if err != nil {
+			return out, err
+		}
 	}
-	out := LocalSearchResult{}
+	list = slices.Clone(list)
+	slices.SortFunc(list, func(a, b Session) int {
+		return cmp.Or(cmp.Compare(b.UpdatedAt, a.UpdatedAt), cmp.Compare(a.Key, b.Key))
+	})
 	count := 0
 	for _, s := range list {
-		if !q.SessionMatch(s) {
+		if !q.SessionMatch(s) || s.Messages == 0 || (q.Since > 0 && s.UpdatedAt < q.Since) || (q.Until > 0 && s.UpdatedAt > q.Until) {
 			continue
-		}
-		if (s.Structure < 1 && q.NeedsStructure()) || (s.Structure < 2 && q.File != "") {
-			out.Partial = true
 		}
 		var after int64
 		for {
-			if err := ctx.Err(); err != nil {
-				return out, ErrSearchBound
+			if ctx.Err() != nil {
+				return out, ctx.Err()
 			}
-			msgs, more, err := source.Messages(ctx, s.Key, after, MaxPage, PageBudget)
-			if err != nil {
-				return out, err
-			}
+			msgs, more, e := source.Messages(ctx, s.Key, after, MaxPage, PageBudget)
+			err = e
 			for _, m := range msgs {
 				count++
 				if count > SearchCandidates {
 					return out, ErrSearchBound
 				}
+				through = m.Time
+				if through == 0 {
+					through = s.UpdatedAt
+				}
+				level := m.Structure
+				if level == 0 && m.Kind != "" {
+					level = s.Structure
+				}
+				if q.TimeMatch(m, s) && ((m.Kind == "" && q.NeedsStructure()) || (level < 2 && q.File != "")) {
+					out.Partial = true
+				}
 				out.Hits = append(out.Hits, MatchMessage(q, s, m)...)
 				after = m.ID
+			}
+			if err != nil {
+				return out, err
 			}
 			if !more || len(msgs) == 0 {
 				break
 			}
 		}
 	}
-	return FinishSearch(out, q), nil
+	return out, nil
 }
 
 func searchSource(ctx context.Context, src Source, q SearchQuery) (LocalSearchResult, error) {
@@ -401,58 +513,65 @@ func searchSource(ctx context.Context, src Source, q SearchQuery) (LocalSearchRe
 }
 
 func (c *Combined) Search(ctx context.Context, q SearchQuery) (LocalSearchResult, error) {
-	out := LocalSearchResult{}
-	available := false
-	native := map[string]bool{}
-	// ACP's identities suppress Wake duplicates even when their text did not match.
-	if c.ACP != nil {
-		list, e := c.ACP.Sessions(ctx)
-		if e == nil {
-			for _, s := range list {
-				native[strings.TrimPrefix(s.Key, "antigravity-acp:")] = true
-			}
-		}
+	type result struct {
+		r LocalSearchResult
+		e error
 	}
-	for sourceIndex, src := range []Source{c.Wake, c.ACP} {
+	ch := make(chan result, 2)
+	count := 0
+	for i, src := range []Source{c.Wake, c.ACP} {
 		if src == nil {
 			continue
 		}
-		sourceQuery := q
-		if sourceIndex == 0 {
-			for id := range native {
-				sourceQuery.ExcludeKeys = append(sourceQuery.ExcludeKeys, "antigravity:"+id)
+		count++
+		go func(i int, src Source) {
+			sourceQuery := q
+			if i == 1 && q.LocalSessions != nil {
+				sourceQuery.LocalSessions = []Session{}
+				for _, sess := range q.LocalSessions {
+					if strings.HasPrefix(sess.Key, "antigravity-acp:") {
+						sourceQuery.LocalSessions = append(sourceQuery.LocalSessions, sess)
+					}
+				}
 			}
-		}
-		r, e := searchSource(ctx, src, sourceQuery)
-		if errors.Is(e, ErrNoIndex) {
+			// The feed has already deduplicated native ACP identities. It is also the
+			// authoritative allow-list, before either source applies its result limit.
+			if i == 0 && q.AllowedKeys != nil {
+				for key := range q.AllowedKeys {
+					if id, ok := strings.CutPrefix(key, "antigravity-acp:"); ok {
+						sourceQuery.ExcludeKeys = append(sourceQuery.ExcludeKeys, "antigravity:"+id)
+					}
+				}
+			}
+			sc, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			r, e := searchSource(sc, src, sourceQuery)
+			ch <- result{r, e}
+		}(i, src)
+	}
+	out := LocalSearchResult{}
+	available := false
+	for range count {
+		v := <-ch
+		if errors.Is(v.e, ErrNoIndex) {
 			continue
 		}
-		if e == nil {
-			available = true
-		}
-		if e != nil {
-			out.Partial = true
-			out.Note = "a local source could not complete search: " + e.Error()
-			r = LocalSearchResult{}
-		}
-		out.Partial = out.Partial || r.Partial
-		out.More = out.More || r.More
-		for _, g := range r.Sessions {
-			id, ok := strings.CutPrefix(g.Key, "antigravity:")
-			if ok && native[id] {
-				continue
+		available = true
+		if v.e != nil {
+			if SearchInterrupted(ctx, v.e) {
+				v.r.Bound(0)
+			} else {
+				v.r.Partial = true
+				v.r.Note = JoinNote(v.r.Note, "local source unavailable; narrow the query or retry: "+v.e.Error())
 			}
-			out.Sessions = append(out.Sessions, g)
 		}
-		for _, h := range r.Hits {
-			id, ok := strings.CutPrefix(h.Key, "antigravity:")
-			if ok && native[id] {
-				continue
-			}
-			out.Hits = append(out.Hits, h)
-		}
+		out.Hits = append(out.Hits, v.r.Hits...)
+		out.Sessions = append(out.Sessions, v.r.Sessions...)
+		out.Partial = out.Partial || v.r.Partial
+		out.More = out.More || v.r.More
+		out.Note = JoinNote(out.Note, v.r.Note)
 	}
-	if !available && !out.Partial {
+	if !available {
 		return out, ErrNoIndex
 	}
 	return FinishSearch(out, q), nil

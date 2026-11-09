@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // ErrNotRunning means nothing is listening on the control socket.
@@ -68,7 +69,14 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 	if err != nil {
 		var op *net.OpError
 		if errors.As(err, &op) && op.Op == "dial" {
-			return ErrNotRunning
+			switch {
+			case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+				return fmt.Errorf("control socket access denied; a sandbox may be blocking it: %w", err)
+			case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ECONNREFUSED):
+				return ErrNotRunning
+			default:
+				return err
+			}
 		}
 		return err
 	}

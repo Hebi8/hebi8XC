@@ -93,3 +93,46 @@ func TestSearchFormatAndBounds(t *testing.T) {
 		t.Fatal("100 terms allowed")
 	}
 }
+
+func TestSearchCJKBackfillAndBoundedShortScan(t *testing.T) {
+	d := waketest.New(t, t.TempDir())
+	d.Put(waketest.Session{Key: "codex:example", Agent: "codex", UpdatedAt: 1000}, waketest.Message{Text: "测试 js"})
+	d.Exec("INSERT INTO schema_meta VALUES('cjk_backfill','1')")
+	d.Exec("DELETE FROM messages_cjk")
+	x := wake.Open(d.Path)
+	defer x.Close()
+	r, e := x.Search(context.Background(), sessions.SearchQuery{Terms: []string{"测试"}, Limit: 50})
+	if e != nil || len(r.Hits) != 1 {
+		t.Fatal(r, e)
+	}
+	d.Exec(`WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<2050) INSERT INTO messages(session_key,seq,role,ts,text) SELECT 'codex:example',x+1,'user',1000+x,'js' FROM n`)
+	r, e = x.Search(context.Background(), sessions.SearchQuery{Terms: []string{"js"}, Limit: 50})
+	if e != nil || len(r.Hits) != 50 || !r.Partial || !strings.Contains(r.Note, "through") {
+		t.Fatal(len(r.Hits), r.Partial, r.Note, e)
+	}
+	r, e = x.Search(context.Background(), sessions.SearchQuery{File: "store.go", Since: 10000, Limit: 50})
+	if e != nil || r.Partial {
+		t.Fatal(r, e)
+	}
+}
+
+func TestSQLFileFiltersAndErrors(t *testing.T) {
+	d := waketest.New(t, t.TempDir())
+	d.Put(waketest.Session{Key: "codex:example", Agent: "codex", UpdatedAt: 1000}, waketest.Message{Text: "test", Time: 1000})
+	d.Structure("codex:example", 1, sessions.Message{Calls: []sessions.Call{{Tool: "Bash", Error: true, Files: []sessions.File{{Path: `C:\project\store.go`, Op: "change"}}}, {Tool: "read", Files: []sessions.File{{Path: "/project/xstore.go", Op: "read"}}}}})
+	x := wake.Open(d.Path)
+	defer x.Close()
+	for _, q := range []sessions.SearchQuery{{File: "store.go", Errors: true, Tool: "Bash", Kind: "text", Agent: "codex", Since: 999, Until: 1001, Limit: 50}, {File: `././c:\project\store.go`, Failed: true, Limit: 50}} {
+		if e := q.Validate(); e != nil {
+			t.Fatal(e)
+		}
+		r, e := x.Search(context.Background(), q)
+		if e != nil || len(r.Hits) != 1 {
+			t.Fatal(r, e)
+		}
+	}
+	r, e := x.Search(context.Background(), sessions.SearchQuery{File: "store.go", Op: "read", Limit: 50})
+	if e != nil || len(r.Hits) != 0 {
+		t.Fatal(r, e)
+	}
+}

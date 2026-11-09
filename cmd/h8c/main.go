@@ -46,9 +46,12 @@ const usage = `usage: h8c [--data-dir DIR] <command>
                          list the agent sessions of all nodes, newest first
   export [--epoch E] [--after N] [--since W] [--ack N] [--limit N] --json
                          export local snapshots; W is Unix milliseconds
-  search [TERM...] [--file PATH] [--by-session] [--json]
+  search [TERM...] [--file PATH] [--op change|delete|read|any] [--failed]
+         [--tool NAME] [--kind K] [--errors] [--agent A] [--project P] [--node N]
+         [--since WHEN] [--until WHEN] [--limit N] [--by-session] [--json]
                          search message text, thinking and calls across nodes
-  show NODE/KEY [--after ID] [--limit N] [--json]
+  show [NODE/]KEY [--after ID] [--limit N] [--all] [--json]
+       [--around ID --before N --after N [--rev R]]
                          read a session; the first column of "sessions" is NODE/KEY
   web                    print the link that opens the web interface in a browser
   roster                 list the trusted keys and where they come from
