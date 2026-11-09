@@ -1,10 +1,10 @@
 # Proposal: structured sessions
 
-Written 2026-11-02 and revised the same day: after a review; after the user asked whether Wake, not h8c, should produce the structure; after the user's correction that no agent is to be treated as first class; and after the user's decision that lifelog's new data need not fit its old rows. A design, not an implementation. It takes items 1, 2 and 6 of "What could come next" in [roadmap.md](../roadmap.md) together, because they share one piece of work, and adds a consumer outside this repository: the user's personal data store, *lifelog*, which is to take its session events from h8c instead of parsing agent files itself.
+Written 2026-11-02 and revised the same day: after a review; after asking whether Wake, not h8c, should produce the structure; after settling that no agent is to be treated as first class; and after deciding that lifelog's new data need not fit its old rows. A design, not an implementation. It takes items 1, 2 and 6 of "What could come next" in [roadmap.md](../roadmap.md) together, because they share one piece of work, and adds a consumer outside this repository: a personal data store, *lifelog*, which is to take its session events from h8c instead of parsing agent files itself.
 
 In one sentence: Wake, in a fork of ours, writes the structure its adapters already parse (tool calls, thinking, kinds, and usage wherever a source has it) into side tables of its index at indexing time, with the text uncut; h8c reads them over the read-only path it has, keeps reading the Antigravity ACP database itself and takes that agent's structure from the transcript beside it, publishes the structure to peers as optional additions to protocol 1, answers `h8c search` across machines with anchors into sessions, and offers the local index to lifelog over the control socket, one device at a time, as a new source beside the old rows.
 
-Where this document describes real data or code, it was checked on 2026-11-02 on one of the user's machines, looking at structure and counts only, and against Wake's source at v0.10.2. Numbers are rounded; names and values in examples are made up.
+Where this document describes real data or code, it was checked on 2026-11-02 on one machine, looking at structure and counts only, and against Wake's source at v0.10.2. Numbers are rounded; names and values in examples are made up.
 
 ## 1. Where things stand
 
@@ -123,7 +123,7 @@ Two builds of the same protocol version must keep working together, in both dire
 
 ### What agents actually have
 
-Every agent in use here (Claude Code, Codex, Antigravity, the Lody sessions that run them) can run a command and read JSON. obelisk reaches its agents through a CLI and a skill only, and finds that enough. An MCP tool costs context in every prompt whether used or not, and the user's sessions already carry hundreds of tool definitions. So:
+Every agent in use here (Claude Code, Codex, Antigravity, the Lody sessions that run them) can run a command and read JSON. obelisk reaches its agents through a CLI and a skill only, and finds that enough. An MCP tool costs context in every prompt whether used or not, and the sessions here already carry hundreds of tool definitions. So:
 
 **First a command line and a skill, then MCP over the same calls.**
 
@@ -233,13 +233,13 @@ Each phase is shippable alone, with every test, `go vet`, `gofmt`, the three bui
 
 - `h8c mcp`; the `gone` flag and `h8c forget` (decision 3); the fork's changes offered upstream as pull requests in the order of section 2, and the fork retired when they land; if Wake comes to read the ACP database itself, h8c's reader retired too.
 
-## 8. Decisions for the user
+## 8. Decisions
 
-1. **Wake produces the structure, in a fork of ours first, offered upstream after it runs on every machine** (section 2), or the fork only with no pull request, or h8c's own readers as in the first draft. *Recommended: the fork, then upstream.* Opening a pull request on the Wake repository is an action in public and is not taken without the user's word; until the changes land, the fork follows Wake's releases, which is the cost of this direction.
+1. **Wake produces the structure, in a fork of ours first, offered upstream after it runs on every machine** (section 2), or the fork only with no pull request, or h8c's own readers as in the first draft. *Recommended: the fork, then upstream.* Opening a pull request on the Wake repository is a public step, taken on its own and not as part of this work; until the changes land, the fork follows Wake's releases, which is the cost of this direction.
 2. **Feed lifelog per device from the local node** (section 6), or have one node pull the net. *Recommended: per device.* It matches lifelog's rules, needs no eager mirror, and gets the text uncut.
 3. **Keep the index of a session after its file is gone.** Claude Code keeps transcripts for about a month; today Wake drops the session, h8c marks it deleted, and every peer removes its copy. That is right for a session the user deleted and wrong for one the agent cleaned up, and the two cannot be told apart from the file system: keeping means that a session the user deleted on purpose also stays, on every node, until `h8c forget NODE/KEY` removes it. *Recommended: keep it, in the fork.* h8c stores no rows of local sessions in this design, so keeping needs an owner: Wake, which already records a vanished file in its `tombstones`, keeps the session's rows instead of deleting them, marks the session, and leaves it out of its own lists unless asked; h8c reads the mark, publishes `gone` in the feed instead of `deleted`, peers keep what they have, `h8c sessions` shows the mark and `--gone` filters. If upstream does not want that, it stays a patch of the fork. The alternative is h8c keeping a copy of every local session, which is the local index the first draft had. lifelog is the archive of record either way; this is about what agents can still find.
 
-Not a decision any more: whether the new data fits lifelog's old rows (the user decided it need not), and the cut of long messages (the side table keeps them whole; raising Wake's own cut would cost the FTS three times the text and change Wake's search, so it is not proposed).
+Not a decision any more: whether the new data fits lifelog's old rows (it need not), and the cut of long messages (the side table keeps them whole; raising Wake's own cut would cost the FTS three times the text and change Wake's search, so it is not proposed).
 
 ## 9. Open points
 

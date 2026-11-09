@@ -34,7 +34,7 @@ Not yet tried on a real machine: the firewall commands in the README's Windows s
 
 ## What could come next
 
-Roughly in the order that seems most useful. Structured sessions Phase 1 is implemented; the phases below remain. Items 1, 2 and 6 are designed together in [proposals/structured-sessions.md](proposals/structured-sessions.md), which also says how the user's personal data store would take its session events from h8c; the fork, per-device lifelog collection and eventual retention choices have been accepted. Retention itself is outside Phase 1.
+Roughly in the order that seems most useful. Structured sessions Phase 1 is implemented; the phases below remain. Items 1, 2 and 6 are designed together in [proposals/structured-sessions.md](proposals/structured-sessions.md), which also says how a personal data store, lifelog, would take its session events from h8c; the fork, per-device lifelog collection and eventual retention choices have been accepted. Retention itself is outside Phase 1.
 
 1. **Search in the text of sessions, across machines.** Today the search matches titles and project names only. Each machine's Wake index already holds the full text, so this is a query sent to every node and the answers merged: a new route between nodes (an addition to protocol 1), `h8c search`, and the search box of the page. To work out: how to query Wake's full-text tables safely, and what to do about machines that are off (only their copies can be searched).
 2. **An MCP server for agents.** `h8c mcp`, read-only, with list, search and read over the whole net, so an agent on one machine can pick up what was done on another. What it returns comes from session text and must be treated as untrusted.
