@@ -33,7 +33,7 @@ func (s *Service) ControlRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/sessions/export", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
-		options := ExportOptions{After: after, Limit: limitParam(q.Get("limit"), 100)}
+		options := ExportOptions{Epoch: q.Get("epoch"), After: after, Limit: limitParam(q.Get("limit"), 100)}
 		for name, dst := range map[string]**int64{"ack": &options.Ack, "since": &options.Since} {
 			if q.Has(name) {
 				n, err := strconv.ParseInt(q.Get(name), 10, 64)

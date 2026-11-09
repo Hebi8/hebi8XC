@@ -752,7 +752,8 @@ UPDATE nodes SET cursor=0;
 -- No row until the first export: startup refreshes must not defeat since.
 CREATE TABLE IF NOT EXISTS export_state (
   id INTEGER PRIMARY KEY CHECK (id = 1),
-  since INTEGER
+  since INTEGER,
+  initial_rev INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS export_log (
   cursor INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -763,7 +764,8 @@ CREATE TABLE IF NOT EXISTS export_scan (
   key TEXT PRIMARY KEY,
   rev INTEGER NOT NULL,
   g INTEGER NOT NULL,
-  logged INTEGER NOT NULL
+  logged INTEGER NOT NULL,
+  session TEXT NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS export_messages (
   key TEXT NOT NULL,
@@ -772,6 +774,7 @@ CREATE TABLE IF NOT EXISTS export_messages (
   role TEXT NOT NULL,
   ts INTEGER NOT NULL,
   print TEXT NOT NULL,
+  structured INTEGER NOT NULL,
   PRIMARY KEY (key, g, seq)
 ) WITHOUT ROWID;
 UPDATE meta SET v='2' WHERE k='schema';`)

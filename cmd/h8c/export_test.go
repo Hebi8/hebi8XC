@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -32,7 +34,7 @@ func TestPhase2Commands(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	svc := &sessions.Service{Store: store, Source: x, Self: sessions.Peer{ID: "desk", Name: "desk"}, Peers: func() []sessions.Peer { return nil }}
+	svc := &sessions.Service{Log: slog.New(slog.NewTextHandler(io.Discard, nil)), Store: store, Source: x, Self: sessions.Peer{ID: "desk", Name: "desk"}, Peers: func() []sessions.Peer { return nil }}
 	if err := svc.RefreshLocal(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +72,10 @@ func TestPhase2Commands(t *testing.T) {
 		t.Fatal(page)
 	}
 	first := page.Next
+	var restarted sessions.ExportPage
+	if err := json.Unmarshal([]byte(run("export", "--epoch", "old-epoch", "--after", "999", "--ack", "999", "--json")), &restarted); err != nil || len(restarted.Items) != 2 || restarted.Next != 2 {
+		t.Fatal("CLI epoch protection", err, restarted)
+	}
 	if err := json.Unmarshal([]byte(run("export", "--after", strconv.FormatInt(first, 10), "--ack", strconv.FormatInt(first, 10), "--since", "0", "--json")), &page); err != nil {
 		t.Fatal(err)
 	}

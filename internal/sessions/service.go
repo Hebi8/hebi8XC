@@ -171,7 +171,7 @@ func (s *Service) SyncLocal(ctx context.Context) {
 
 // RefreshLocal reads the local index and updates the feed. Once Export has
 // initialized its watermark, it also snapshots changed local sessions. It does
-// not invoke the external indexer. A failed export scan is returned and retried
+// not invoke the external indexer. A failed export scan is logged separately and retried
 // even if the feed revision does not change on the next refresh.
 func (s *Service) RefreshLocal(ctx context.Context) error {
 	s.Store.exportMu.Lock()
@@ -193,23 +193,23 @@ func (s *Service) refreshLocal(ctx context.Context) error {
 		return fmt.Errorf("session feed not updated: %w", err)
 	}
 	if err := s.Store.scanExport(ctx, s.Self.ID, s.Source, nil); err != nil {
-		return fmt.Errorf("session export not updated: %w", err)
+		s.say(slog.LevelWarn, "export", err.Error())
+	} else {
+		s.say(slog.LevelInfo, "export", "")
 	}
 	if stale, ok := s.Source.(interface{ Stale() error }); ok && stale.Stale() != nil {
 		return fmt.Errorf("showing the last list of a source that cannot be read: %w", stale.Stale())
 	}
 	s.setLocalNote("")
-	if s.Log != nil {
-		s.say(slog.LevelInfo, "source", fmt.Sprintf("sharing the sessions of this machine (%d)", len(current)))
-		if changed > 0 {
-			s.Log.Debug("session feed updated", "sessions", len(current), "changed", changed)
-		}
+	s.say(slog.LevelInfo, "source", fmt.Sprintf("sharing the sessions of this machine (%d)", len(current)))
+	if changed > 0 {
+		s.Log.Debug("session feed updated", "sessions", len(current), "changed", changed)
 	}
 	return nil
 }
 
 // Export returns immutable local snapshots, never peer copies. The first call
-// refreshes the local feed and atomically establishes Since and its baseline.
+// refreshes the local feed, establishes Since and scans its baseline by session.
 // Further calls read the log even if the index is temporarily unavailable;
 // RefreshLocal (also called by SyncLocal) appends subsequent changes.
 func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportPage, error) {
@@ -224,7 +224,7 @@ func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportPage
 			return ExportPage{}, err
 		}
 		if err := s.Store.scanExport(ctx, s.Self.ID, s.Source, &options); err != nil {
-			return ExportPage{}, err
+			s.say(slog.LevelWarn, "export", err.Error())
 		}
 		// These may belong to a lost store. They cannot acknowledge this
 		// epoch's newly created snapshots before the caller has seen them.

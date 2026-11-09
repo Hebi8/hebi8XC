@@ -23,8 +23,10 @@ import (
 // exported regardless of their timestamps. Nil on later calls inherits the
 // persisted watermark; later calls keep that first watermark. On the first
 // call in a new store, After and Ack are ignored, since they may name a lost
-// epoch. The collector must detect Epoch changes and restart its cursor at 0.
+// epoch. A supplied Epoch that differs also resets After and ignores Ack.
+// The collector must detect Epoch changes and restart its cursor at 0.
 type ExportOptions struct {
+	Epoch string
 	After int64
 	Limit int
 	Ack   *int64
@@ -33,7 +35,8 @@ type ExportOptions struct {
 
 // ExportPage is the response for the local control export endpoint. Next is the
 // last delivered cursor (After when empty), even on the last page; it is never
-// reset to zero at the end. Items are immutable, ordered by increasing Cursor.
+// reset to zero at the end. A first request or epoch mismatch starts at zero.
+// Items are immutable, ordered by increasing Cursor.
 type ExportPage struct {
 	Epoch string       `json:"epoch"`
 	Items []ExportItem `json:"items"`
@@ -71,37 +74,29 @@ func (s *Store) exportActive(ctx context.Context) (bool, error) {
 	return active, err
 }
 
-// scanExport does nothing before the first Export (initialize != nil). The
-// append, message identities and per-session scan revision commit together.
-// Callers hold exportMu, so a refresh cannot replace the feed while scanning.
+// scanExport initializes a durable cutoff, then commits each session separately.
+// Source reads and fingerprint/JSON work never hold the store connection.
+// Callers hold exportMu; peer reads do not take that lock.
 func (s *Store) scanExport(ctx context.Context, self string, source Source, initialize *ExportOptions) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	var since sql.NullInt64
-	err = tx.QueryRowContext(ctx, `SELECT since FROM export_state WHERE id=1`).Scan(&since)
-	first := errors.Is(err, sql.ErrNoRows)
-	if err != nil && !first {
-		return err
-	}
-	if first {
+	var initialRev int64
+	err := s.db.QueryRowContext(ctx, `SELECT since,initial_rev FROM export_state WHERE id=1`).Scan(&since, &initialRev)
+	if errors.Is(err, sql.ErrNoRows) {
 		if initialize == nil {
 			return nil
 		}
-		if initialize.Since != nil {
-			since = sql.NullInt64{Int64: *initialize.Since, Valid: true}
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO export_state(id,since) VALUES (1,?)`, since); err != nil {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO export_state(id,since,initial_rev)
+   SELECT 1,?,COALESCE(MAX(rev),0) FROM sessions WHERE node=?`, initialize.Since, self); err != nil {
 			return err
 		}
+		if err := s.db.QueryRowContext(ctx, `SELECT since,initial_rev FROM export_state WHERE id=1`).Scan(&since, &initialRev); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
 	}
-	// Load only metadata here and close its rows before issuing writes. Message
-	// bodies are held for one changed session at a time, read in Source pages.
-	rows, err := tx.QueryContext(ctx, `SELECT `+sessionColumns+`, rev, deleted FROM sessions
-		WHERE node=? AND rev > COALESCE((SELECT rev FROM export_scan WHERE key=sessions.key),0)
-		ORDER BY rev`, self)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+sessionColumns+`, rev, deleted FROM sessions
+  WHERE node=? AND rev > COALESCE((SELECT rev FROM export_scan WHERE key=sessions.key),0) ORDER BY rev`, self)
 	if err != nil {
 		return err
 	}
@@ -118,37 +113,52 @@ func (s *Store) scanExport(ctx context.Context, self string, source Source, init
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	var failures []error
 	for _, c := range changes {
-		emit := !(first && since.Valid && c.UpdatedAt < since.Int64)
-		if err := scanExportSession(ctx, tx, source, c, emit); err != nil {
-			return fmt.Errorf("export session %q: %w", c.Key, err)
+		initialBaseline := since.Valid && c.Rev <= initialRev && c.UpdatedAt < since.Int64
+		if err := s.scanExportSession(ctx, source, c, initialBaseline); err != nil {
+			failures = append(failures, fmt.Errorf("export session %q: %w", c.Key, err))
 		}
 	}
-	return tx.Commit()
+	return errors.Join(failures...)
 }
 
 type exportIdentity struct {
-	role  string
-	time  int64
-	print string
+	role       string
+	time       int64
+	print      string
+	structured bool
 }
 
-func scanExportSession(ctx context.Context, tx *sql.Tx, source Source, c Change, emit bool) error {
+type exportMessage struct {
+	message Message
+	print   string
+}
+
+func (s *Store) scanExportSession(ctx context.Context, source Source, c Change, initialBaseline bool) error {
 	var g int64
 	var logged bool
-	err := tx.QueryRowContext(ctx, `SELECT g,logged FROM export_scan WHERE key=?`, c.Key).Scan(&g, &logged)
+	var previousJSON string
+	err := s.db.QueryRowContext(ctx, `SELECT g,logged,session FROM export_scan WHERE key=?`, c.Key).Scan(&g, &logged, &previousJSON)
+	scanned := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	var previous Session
+	if scanned {
+		if err := json.Unmarshal([]byte(previousJSON), &previous); err != nil {
+			return err
+		}
+	}
 	known := make(map[int64]exportIdentity)
-	rows, err := tx.QueryContext(ctx, `SELECT seq,role,ts,print FROM export_messages WHERE key=? AND g=?`, c.Key, g)
+	rows, err := s.db.QueryContext(ctx, `SELECT seq,role,ts,print,structured FROM export_messages WHERE key=? AND g=?`, c.Key, g)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
 		var seq int64
 		var id exportIdentity
-		if err := rows.Scan(&seq, &id.role, &id.time, &id.print); err != nil {
+		if err := rows.Scan(&seq, &id.role, &id.time, &id.print, &id.structured); err != nil {
 			rows.Close()
 			return err
 		}
@@ -165,48 +175,99 @@ func scanExportSession(ctx context.Context, tx *sql.Tx, source Source, c Change,
 			return err
 		}
 	}
-	renumbered := false
+	// Retain richer history while the source's side tables are being rebuilt.
+	// New seqs still enter the log; skipped identities keep their old fingerprint.
+	degraded := !c.Deleted && previous.ToolCalls != nil && c.ToolCalls == nil
+	var current []exportMessage
+	changed, renumbered := c.Deleted, false
 	for _, m := range messages {
-		if old, ok := known[m.Seq]; ok && (old.role != m.Role || old.time != m.Time) {
-			renumbered = true
-			g++
-			break
+		old, exists := known[m.Seq]
+		if exists && old.structured && m.Kind == "" {
+			degraded = true
+			continue
 		}
-	}
-	if emit {
-		if err := appendExport(ctx, tx, ExportItem{Type: "session", Key: c.Key, Agent: c.Agent,
-			G: g, Rev: c.Rev, Deleted: c.Deleted, Session: &c.Session}); err != nil {
-			return err
-		}
-	}
-	for _, m := range messages {
-		// ID is only a paging cursor; reparsing may replace it without changing
-		// the message. The snapshot still contains the actual ID read this time.
 		body := m
-		body.ID = 0
+		body.ID = 0 // source paging ids change on reindexing
 		raw, err := json.Marshal(body)
 		if err != nil {
 			return err
 		}
 		sum := sha256.Sum256(raw)
 		print := hex.EncodeToString(sum[:])
-		old, exists := known[m.Seq]
-		if emit && (!logged || renumbered || !exists || old.print != print) {
-			if err := appendExport(ctx, tx, ExportItem{Type: "message", Key: c.Key, Agent: c.Agent,
-				G: g, Seq: m.Seq, Rev: c.Rev, Message: &m}); err != nil {
+		changed = changed || !exists || old.print != print
+		renumbered = renumbered || (exists && (old.role != m.Role || old.time != m.Time))
+		current = append(current, exportMessage{message: m, print: print})
+	}
+	// A stale parse cannot supply the full new generation. Keep identities
+	// stable until structure recovers; new seqs can still be archived now.
+	if degraded && renumbered {
+		renumbered = false
+		kept := current[:0]
+		changed = false
+		for _, m := range current {
+			old, exists := known[m.message.Seq]
+			if exists && (old.role != m.message.Role || old.time != m.message.Time) {
+				continue
+			}
+			changed = changed || !exists || old.print != m.print
+			kept = append(kept, m)
+		}
+		current = kept
+	}
+	if degraded {
+		c.ToolCalls, c.ToolErrors = previous.ToolCalls, previous.ToolErrors
+		c.Tokens, c.Files = previous.Tokens, previous.Files
+	}
+	if renumbered {
+		g++
+	}
+	emit := logged || (scanned && changed) || (!scanned && !initialBaseline)
+	var items []string
+	if emit {
+		raw, err := json.Marshal(ExportItem{Type: "session", Key: c.Key, Agent: c.Agent, G: g, Rev: c.Rev, Deleted: c.Deleted, Session: &c.Session})
+		if err != nil {
+			return err
+		}
+		items = append(items, string(raw))
+	}
+	for i := range current {
+		m := &current[i]
+		old, exists := known[m.message.Seq]
+		if emit && (!logged || renumbered || !exists || old.print != m.print) {
+			raw, err := json.Marshal(ExportItem{Type: "message", Key: c.Key, Agent: c.Agent, G: g, Seq: m.message.Seq, Rev: c.Rev, Message: &m.message})
+			if err != nil {
 				return err
 			}
+			items = append(items, string(raw))
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO export_messages(key,g,seq,role,ts,print) VALUES (?,?,?,?,?,?)
-			ON CONFLICT(key,g,seq) DO UPDATE SET role=excluded.role,ts=excluded.ts,print=excluded.print`,
-			c.Key, g, m.Seq, m.Role, m.Time, print); err != nil {
+	}
+	sessionJSON, err := json.Marshal(c.Session)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, raw := range items {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO export_log(item) VALUES (?)`, raw); err != nil {
 			return err
 		}
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO export_scan(key,rev,g,logged) VALUES (?,?,?,?)
-		ON CONFLICT(key) DO UPDATE SET rev=excluded.rev,g=excluded.g,logged=excluded.logged`,
-		c.Key, c.Rev, g, logged || emit)
-	return err
+	for _, m := range current {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO export_messages(key,g,seq,role,ts,print,structured) VALUES (?,?,?,?,?,?,?)
+   ON CONFLICT(key,g,seq) DO UPDATE SET role=excluded.role,ts=excluded.ts,print=excluded.print,structured=excluded.structured`,
+			c.Key, g, m.message.Seq, m.message.Role, m.message.Time, m.print, m.message.Kind != ""); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO export_scan(key,rev,g,logged,session) VALUES (?,?,?,?,?)
+  ON CONFLICT(key) DO UPDATE SET rev=excluded.rev,g=excluded.g,logged=excluded.logged,session=excluded.session`,
+		c.Key, c.Rev, g, logged || emit, string(sessionJSON)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func exportMessages(ctx context.Context, source Source, key string) ([]Message, error) {
@@ -235,15 +296,6 @@ func exportMessages(ctx context.Context, source Source, key string) ([]Message, 
 	}
 }
 
-func appendExport(ctx context.Context, tx *sql.Tx, item ExportItem) error {
-	raw, err := json.Marshal(item)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO export_log(item) VALUES (?)`, string(raw))
-	return err
-}
-
 func (s *Store) exportPage(ctx context.Context, options ExportOptions) (ExportPage, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -253,6 +305,9 @@ func (s *Store) exportPage(ctx context.Context, options ExportOptions) (ExportPa
 	out := ExportPage{Next: options.After, Items: []ExportItem{}}
 	if err := tx.QueryRowContext(ctx, `SELECT v FROM meta WHERE k='epoch'`).Scan(&out.Epoch); err != nil {
 		return ExportPage{}, err
+	}
+	if options.Epoch != "" && options.Epoch != out.Epoch {
+		options.After, options.Ack, out.Next = 0, nil, 0
 	}
 	if options.Ack != nil {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM export_log WHERE cursor<=?`, *options.Ack); err != nil {

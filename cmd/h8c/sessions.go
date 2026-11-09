@@ -332,6 +332,7 @@ func quoteArg(arg string) string {
 // exportSessions reads the local snapshot log over the control socket.
 func exportSessions(dir string, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("h8c export", flag.ContinueOnError)
+	epoch := fs.String("epoch", "", "epoch of the delivered and acknowledged cursors")
 	after := fs.Int64("after", 0, "last delivered export cursor")
 	since := fs.Int64("since", 0, "initial watermark in Unix milliseconds")
 	ack := fs.Int64("ack", 0, "last durably accepted cursor to prune")
@@ -340,7 +341,7 @@ func exportSessions(dir string, args []string, out io.Writer) error {
 	if _, err := parseAnywhere(fs, args); err != nil {
 		return err
 	}
-	q := url.Values{"after": {strconv.FormatInt(*after, 10)}, "limit": {strconv.Itoa(*limit)}}
+	q := url.Values{"after": {strconv.FormatInt(*after, 10)}, "limit": {strconv.Itoa(*limit)}, "epoch": {*epoch}}
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == "since" {
 			q.Set("since", strconv.FormatInt(*since, 10))

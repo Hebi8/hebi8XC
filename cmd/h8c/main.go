@@ -44,7 +44,7 @@ const usage = `usage: h8c [--data-dir DIR] <command>
   id                     show this node's id, name, public key and account
   sessions [--node N] [--agent A] [--project P] [--since WHEN] [--limit N] [--json] [TEXT]...
                          list the agent sessions of all nodes, newest first
-  export [--after N] [--since W] [--ack N] [--limit N] --json
+  export [--epoch E] [--after N] [--since W] [--ack N] [--limit N] --json
                          export local snapshots; W is Unix milliseconds
   show NODE/KEY [--after ID] [--limit N] [--json]
                          read a session; the first column of "sessions" is NODE/KEY

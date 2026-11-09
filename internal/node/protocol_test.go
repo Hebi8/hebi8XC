@@ -373,15 +373,18 @@ func TestHelloSaysProtocolAndVersion(t *testing.T) {
 // The structure sample is additive to the original protocol-1 samples.
 func TestStructuredProtocol1Answers(t *testing.T) {
 	for _, dir := range []string{"protocol-v1-structure", "protocol-v1-phase2"} {
-		t.Run(dir, func(t *testing.T) { checkStructuredProtocol1Answers(t, dir) })
+		t.Run(dir, func(t *testing.T) { checkStructuredProtocol1Answers(t, dir, false) })
 	}
 }
 
-func checkStructuredProtocol1Answers(t *testing.T, dir string) {
+func checkStructuredProtocol1Answers(t *testing.T, dir string, total bool) {
 	c := newClock()
 	laptop := sessionNode(t, c, "laptop")
 	read := func(name string) []byte {
 		t.Helper()
+		if total && name == "sessions.response.json" {
+			name = "sessions.total.response.json"
+		}
 		raw, err := os.ReadFile(filepath.Join("testdata", dir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -405,7 +408,7 @@ func checkStructuredProtocol1Answers(t *testing.T, dir string) {
 	}
 
 	if dir == "protocol-v1-phase2" {
-		if r.Session.Tokens == nil || *r.Session.Tokens.Input != 7 || len(r.Session.Files) != 1 || len(m.Calls[0].Files) != 1 || m.Calls[0].Files[0].Op != "read" {
+		if r.Session.Tokens == nil || (!total && (r.Session.Tokens.Input == nil || *r.Session.Tokens.Input != 7)) || (total && (r.Session.Tokens.Total == nil || *r.Session.Tokens.Total != 19 || r.Session.Tokens.Input != nil)) || len(r.Session.Files) != 1 || len(m.Calls[0].Files) != 1 || m.Calls[0].Files[0].Op != "read" {
 			t.Fatal("phase 2 fields lost on peer read")
 		}
 		if err := laptop.control("/v1/sessions/messages?node=desk&key=claude:0f3a9c", &r); err != nil || r.From != "cache" || len(r.Messages[1].Calls[0].Files) != 1 {
@@ -467,4 +470,8 @@ func (s *structuredProtocolSource) Sessions(context.Context) ([]sessions.Session
 }
 func (s *structuredProtocolSource) Messages(context.Context, string, int64, int, int) ([]sessions.Message, bool, error) {
 	return s.messages, false, nil
+}
+
+func TestProtocol1TotalTokens(t *testing.T) {
+	checkStructuredProtocol1Answers(t, "protocol-v1-phase2", true)
 }
