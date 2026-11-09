@@ -98,7 +98,7 @@ Every node runs an HTTPS server with mutual TLS 1.3 (`internal/link`). Calls bet
 Machines are updated one at a time, so two nodes rarely run the same build. What nodes say to each other, the hello, the session feed and the reading of messages, has a **protocol version**, a whole number that starts at 1. The rule:
 
 - **Any two builds of the same protocol version work together.** Not "should": it is tested, see below.
-- Within a version the only change allowed is a new field that is optional. A node must do without any field its peer does not send, and ignores fields it does not know. Removing a field, renaming it, requiring a field that used to be optional or was not there, and changing what a field means are not allowed.
+- Within a version a new field that is optional is allowed. A new route that a peer may not serve, where the caller can work without it, is the same kind of change. A node must do without any field its peer does not send, and ignores fields it does not know. Removing a field, renaming it, requiring a field that used to be optional or was not there, and changing what a field means are not allowed.
 - Anything else needs the next protocol version.
 
 Each node says its protocol version and its software version in the hello. A node that says neither runs a build from before these fields existed; all of those speak protocol 1 and are treated so. The node list keeps both values for every peer, and `h8c peers` shows them.
@@ -210,6 +210,50 @@ The format marker and structure freshness stamp participate in the session finge
 On the control socket: `GET /v1/sessions` with `node`, `agent`, `project`, `since`, `text` (repeatable) and `limit` lists the sessions of all nodes, newest first, each with its node and whether that node is online, plus one entry per node with the time its sessions were last read. `GET /v1/sessions/messages` with `node`, `key`, `after` and `limit` reads a page of a session. `h8c sessions` and `h8c show` are these two calls; with `--json` they print the answer as it is, for programs. A session is named `NODE/KEY`, with the node's name where that is unambiguous and its id otherwise.
 
 A session that cannot be read is answered with an error status and a sentence in English, which is what `h8c show` prints. For the reasons a program may want to put in its own words the answer also has the header `H8c-Error` with one word: `not-found`, `offline-not-read` (the node is offline and there is no copy), `incompatible-not-read` (it speaks another protocol and there is no copy) or `feed-restarted` (try again in a moment). The header is optional: a reason without a word has none, and a reader that does not know a word shows the sentence. The page uses it to give these reasons in the reader's language.
+
+### Search and anchors
+
+`h8c search [TERM...] --file PATH --op OP --failed --tool NAME --kind KIND --errors --agent AGENT --project PROJECT --node NODE --since WHEN --until WHEN --limit N --by-session --json` searches across nodes. All options are optional. Terms are literal substrings combined with AND within one field (body, thinking, or one call input). With call filters they may match that call's input or its parent message's body/thinking. Matching folds case; SQLite LIKE folds ASCII case only. Agent, tool and kind use equality, project matches part of the name or path, and node accepts a unique name or id. Since/until are inclusive message-time bounds; a missing timestamp uses session update time. The CLI converts durations (`30d`, `36h`), dates and RFC3339 times to milliseconds.
+
+A file argument matches an exact recorded path, or a relative suffix starting at a path separator. Both slash styles are recognized; `store.go` cannot match `xstore.go`. The default includes non-error change/delete calls. `--op read`, `change`, `delete` or `any` selects operations; `--failed` includes failed attempts. `--errors` selects failed calls (combine with `--failed` for a file query). Empty output does not imply failure. No file named by a query is opened, and shell commands are not interpreted as file operations.
+
+Wake uses its read-only `messages_fts` trigram external-content index for terms of three or more characters. Its DDL must identify `fts5(text, content='messages', content_rowid='id', tokenize='trigram case_sensitive 0')`; missing or unsupported FTS rejects that source with a reason. Exactly two CJK characters use `messages_cjk` only with `cjk_format=1` and the contentless ASCII-tokenizer table. Other short terms use escaped literal LIKE, with indexed terms selecting body candidates when present. Thinking and full call inputs use bounded LIKE within the metadata/time scope; only side rows accepted by the existing structure freshness check count. Body search covers Wake's indexed first 32 KiB, including call previews, not the `full_text` addition. File queries over format 1 and structural queries over stale/text-only sessions mark the node partial.
+
+ACP scans the existing native reader, without persisting local message rows. Unchanged metadata uses the reader's listing cache; messages are read in bounded pages. Transcript thinking, inputs and files follow the same filters. ACP identities suppress duplicate Wake entries before limiting results. Missing structure makes structural queries partial.
+
+Copies gain `search_docs`, external-content trigram `search_fts`, and `search_files`. Each body, thinking and individual call input contributes at most 4 KiB. Triggers maintain indexes on copy inserts, replacements, updates and deletions. Existing messages are backfilled once in the same transaction that creates these tables/triggers. No existing table changes and `meta.schema` remains 2. Phase 2 still opens and writes the store; its writes fire the same triggers. Local/export rows are not indexed here.
+
+Peers receive `GET /v1/sessions/search`, which searches only their own local sources. Protocol remains 1; hello is unchanged and the route is the capability. Peers are asked concurrently with five seconds each. Offline, incompatible, unreachable, timed-out and 404 peers fall back to copies held here. Each requested node reports `live`, `copies` or `none`; `none` means no usable local source or no held copy. `partial` describes missing structure, format-0/incomplete copies or a source failure; `more` describes result truncation. Format-0 copies match text but not file/tool/kind/error filters. A copies answer covers only previously read sessions, even without `partial`.
+
+Search and around requests have ten-second context deadlines; local search has four seconds, leaving time for routing and replies. Search accepts at most 32 nonempty terms and 4096 term bytes; 100 terms are refused with a sentence. Candidate processing is bounded at 10,000 messages (ACP counts scanned messages); oversized grouped queries are refused with a reason to narrow the scope. Ordinary Wake/copy queries stop after enough ordered matches. Limit defaults to 50 and is capped at 500. The existing approximate 1 MiB page budget applies. Snippets contain at most 300 Unicode characters, windowed by h8c around a literal match. SQL values are parameters; MATCH is constructed only from quoted phrases with embedded quotes doubled. Results are untrusted data.
+
+Hits sort by effective message time descending, then node id, key, message id and call index. A matching body/thinking contributes one message hit; each matching call contributes another hit. `--by-session` counts matching hits before applying the session limit, and returns minimum/maximum matching message ids. Groups sort by session update time descending, then node id and key. Counts on partial nodes cover only sources that completed. Search has no pagination cursor: narrow the query when `more` is true.
+
+`h8c show NODE/KEY --around ID --before N --after N [--rev R]` returns a window (default eight before and two after, at most 500 total). In this mode `after` is a count; outside it, it remains an exclusive message cursor. `rev` is the current known feed revision, with a copy's revision separately in `copy_rev`. A newer fetched copy advances the returned revision beyond an older cached feed. `moved: true` means the supplied revision differs, the revision changed during the read, or the exact id disappeared. A missing id centers on the next id, or the last messages if there is no next id. Traversal stops at 10,000 messages or ten seconds. The page budget can shorten context while preserving the anchor. CLI `show` hides meta messages unless `--all`; APIs retain them. Revisions follow the existing feed refresh interval.
+
+#### API for page and control clients
+
+GET `/v1/sessions/search` on the control socket, `/api/v1/sessions/search` on the authenticated web API:
+
+| Parameter | Meaning |
+| --- | --- |
+| `q` (repeatable) | One literal term/phrase per value; omitted for filters-only queries. |
+| `file`, `op`, `failed` | Recorded path; operation (default change/delete); include failed attempts (boolean, default false). |
+| `tool`, `kind`, `error` | Exact tool/kind; failed calls only (boolean, default false). CLI `--errors` maps to `error`. |
+| `agent`, `project`, `node` | Agent equality, project substring, node name/id. No node means all known nodes. |
+| `since`, `until` | Optional inclusive Unix millisecond timestamps. |
+| `limit` | Default 50, maximum 500 hits or groups. |
+| `by_session` | Boolean, default false; CLI `--by-session`. |
+
+Response: `{hits: [], sessions?: [], nodes: [], more: boolean}`. Grouped mode has `hits: []` and `sessions` (omitted when empty).
+
+- Hit fields: `ref`, `key`, `node`, `node_id`, `id`, `rev`, `time`, `snippet`, `title`, `project`, `updated_at`; optional `kind`, `tool`, `call` (zero-based index in the message's calls array), `files: [{path, op}]`. All times are Unix milliseconds.
+- Group fields: `ref`, `key`, `node`, `node_id`, `title`, `project`, `rev`, `hits`, `first`, `last`, `updated_at`.
+- Node fields: `id`, `name`, `searched` (`live|copies|none`), optional `partial: true` and an English `note`. Source refusals appear in node state while other sources/nodes can answer. Invalid parameters return HTTP 400 and a sentence.
+
+The mutual-TLS peer route accepts the same filters except `node` (ignored: always local). It returns `{hits: [], sessions?: [], more, partial?, note?}` without fan-out. An unsupported route may return 404; source failures may return an error and trigger copies at the caller.
+
+For around, GET `/v1/sessions/messages` (control) or `/api/v1/sessions/messages` (web) with `node`, `key`, `around` (positive id), optional `before` (default 8), `after` (default 2), `rev` (anchor revision). `before`/`after` must be nonnegative, sum plus one at most 500; `limit` is ignored in this mode. Existing fields remain: `session` (listing entry), `messages` (full message objects with calls/thinking/usage/files), `format?`, `next` (exclusive cursor for an ordinary continuation, zero at end), `from` (`local|peer|cache`), `cached_at?`, `stale?`, `incomplete?`, `note?`. Added fields are `rev`, `copy_rev?`, `moved?`; they also apply to ordinary reads where relevant. Around uses the existing peer copy/read path and adds no peer messages route.
 
 ### Local export
 
@@ -324,6 +368,8 @@ One node runs per data directory. `h8c up` takes the lock file `lock` (flock, `L
 | `lock` | Held by the running node |
 
 ## Known limits
+
+- Search sees only previously read copies when a peer cannot answer live. Copies index 4 KiB per field; Wake body search covers the indexed 32 KiB. Broad queries can hit time/work bounds; missing structure is partial. Around revisions follow the normal feed refresh interval. Search UI and the agent skill are separate Phase 3 work.
 
 - Export: rebuilding a lost store restarts numbering generations at `g=0`. If a session had previously been renumbered, it is exported again under generation-0 keys and can overwrite older generation-0 rows at the collector. This requires both loss of the store and a previously renumbered session; epoch-bound acknowledgements do not preserve generation history.
 - Sessions: Wake omits Claude Code user inputs queued while the agent is busy, so h8c and its export omit them too. A lifelog comparison found six such messages across four devices over one week.

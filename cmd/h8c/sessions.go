@@ -226,7 +226,11 @@ func printJSON(out io.Writer, v any) error {
 
 func showSession(dir string, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("h8c show", flag.ContinueOnError)
-	after := fs.Int64("after", 0, "continue after the message with this id")
+	after := fs.Int64("after", 0, "cursor, or number of messages after --around")
+	around := fs.Int64("around", 0, "anchor message id")
+	before := fs.Int("before", 8, "messages before anchor")
+	rev := fs.Int64("rev", 0, "revision of the search anchor")
+	all := fs.Bool("all", false, "include meta messages")
 	limit := fs.Int("limit", 50, "how many messages to show, at most "+strconv.Itoa(sessions.MaxPage))
 	asJSON := fs.Bool("json", false, "print JSON")
 	rest, err := parseAnywhere(fs, args)
@@ -243,15 +247,41 @@ func showSession(dir string, args []string, out io.Writer) error {
 	q := url.Values{"node": {nodeName}, "key": {key},
 		"after": {strconv.FormatInt(*after, 10)}, "limit": {strconv.Itoa(*limit)}}
 
+	if *around != 0 {
+		q.Set("around", strconv.FormatInt(*around, 10))
+		q.Set("before", strconv.Itoa(*before))
+		q.Set("after", "2")
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "after" {
+				q.Set("after", strconv.FormatInt(*after, 10))
+			}
+			if f.Name == "rev" {
+				q.Set("rev", strconv.FormatInt(*rev, 10))
+			}
+		})
+	}
 	var r sessions.Reading
 	err = control.Dial(filepath.Join(dir, node.ControlSocket)).Get(context.Background(), "/v1/sessions/messages?"+q.Encode(), &r)
 	if err != nil {
 		return err
 	}
+	if !*all {
+		filtered := r.Messages[:0]
+		for _, m := range r.Messages {
+			if m.Kind != "meta" {
+				filtered = append(filtered, m)
+			}
+		}
+		r.Messages = filtered
+	}
 	if *asJSON {
 		return printJSON(out, r)
 	}
 
+	fmt.Fprintf(out, "rev: %d\n", r.Rev)
+	if r.Moved {
+		fmt.Fprintln(out, "note: the anchor revision has moved")
+	}
 	s := r.Session
 	fmt.Fprintf(out, "%s\n%s on %s, %s, %d messages, updated %s\n", oneLine(s.Title, 100),
 		s.Agent, s.Node, s.ProjectPath, s.Messages, s.UpdatedAt.Local().Format(time.DateTime))

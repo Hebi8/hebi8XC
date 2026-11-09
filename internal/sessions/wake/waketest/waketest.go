@@ -6,7 +6,9 @@ package waketest
 
 import (
 	"database/sql"
+	"github.com/Hebi8/hebi8XC/internal/sessions"
 	"path/filepath"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -55,6 +57,19 @@ CREATE TABLE IF NOT EXISTS messages (
   text         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_key);
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, content='messages', content_rowid='id', tokenize="trigram case_sensitive 0");
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_cjk USING fts5(text, content='', contentless_delete=1, tokenize="ascii");
+CREATE TRIGGER IF NOT EXISTS fts_delete AFTER DELETE ON messages BEGIN
+ INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.id,old.text);
+ DELETE FROM messages_cjk WHERE rowid=old.id;
+END;
+CREATE TRIGGER IF NOT EXISTS fts_insert AFTER INSERT ON messages BEGIN
+ INSERT INTO messages_fts(rowid,text) VALUES(new.id,new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS fts_update AFTER UPDATE OF text ON messages BEGIN
+ INSERT INTO messages_fts(messages_fts,rowid,text) VALUES('delete',old.id,old.text);
+ INSERT INTO messages_fts(rowid,text) VALUES(new.id,new.text);
+END;
 `
 
 // DB is a fake Wake index. Like Wake it keeps a connection open and
@@ -103,7 +118,7 @@ func New(t TB, dir string) *DB {
 	d.db = db
 	t.Cleanup(func() { db.Close() })
 	d.Exec(Schema)
-	d.Exec(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('fts_format', '16')`)
+	d.Exec(`INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('fts_format', '16'), ('cjk_format','1')`)
 	return d
 }
 
@@ -148,6 +163,21 @@ func (d *DB) Append(key string, msgs ...Message) {
 		size += int64(len(m.Text))
 		d.Exec(`INSERT INTO messages(session_key, sidechain_id, seq, role, ts, text) VALUES (?, ?, ?, ?, ?, ?)`,
 			key, null(m.Sidechain), seq, m.Role, m.Time, m.Text)
+		var id int64
+		if err := d.db.QueryRow("SELECT last_insert_rowid()").Scan(&id); err != nil {
+			d.t.Fatal(err)
+		}
+		var pairs []string
+		r := []rune(m.Text)
+		cjk := func(c rune) bool {
+			return sessions.CJKRune(c)
+		}
+		for i := 1; i < len(r); i++ {
+			if cjk(r[i-1]) && cjk(r[i]) {
+				pairs = append(pairs, string(r[i-1:i+1]))
+			}
+		}
+		d.Exec("INSERT INTO messages_cjk(rowid,text) VALUES (?,?)", id, strings.Join(pairs, " "))
 	}
 	d.Exec(`UPDATE sessions SET message_count = (SELECT COUNT(*) FROM messages WHERE session_key = ?),
 		file_size = file_size + ?, file_mtime = file_mtime + ?, updated_at = updated_at + ? WHERE key = ?`,

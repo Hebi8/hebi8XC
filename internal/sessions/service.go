@@ -49,9 +49,10 @@ type Service struct {
 	Peers func() []Peer
 	// Fetch gets path from the peer at addr and decodes the JSON answer
 	// into out. It fails if the node that answers is not the peer.
-	Fetch func(ctx context.Context, peer Peer, path string, out any) error
-	Now   func() time.Time
-	Log   *slog.Logger
+	Fetch             func(ctx context.Context, peer Peer, path string, out any) error
+	PeerSearchContext func(context.Context, time.Duration) (context.Context, context.CancelFunc)
+	Now               func() time.Time
+	Log               *slog.Logger
 
 	mu        sync.Mutex
 	unshared  string // why the sessions of this machine are not shared; "" if they are
@@ -609,6 +610,9 @@ func lessNode(a, b Node) bool {
 
 // Reading is a page of a session, with where it came from.
 type Reading struct {
+	Rev      int64     `json:"rev"`
+	CopyRev  int64     `json:"copy_rev,omitempty"`
+	Moved    bool      `json:"moved,omitempty"`
 	Format   int       `json:"format,omitempty"`
 	Session  Entry     `json:"session"`
 	Messages []Message `json:"messages"`
@@ -686,7 +690,7 @@ func (s *Service) Read(ctx context.Context, node, key string, after int64, limit
 	if !ok {
 		return Reading{}, fmt.Errorf("%w %q on %s", ErrNotFound, key, n.Name)
 	}
-	out := Reading{Session: entry(sess, n, nodes)}
+	out := Reading{Session: entry(sess, n, nodes), Rev: rev}
 
 	var msgs []Message
 	var more bool
@@ -705,6 +709,8 @@ func (s *Service) Read(ctx context.Context, node, key string, after int64, limit
 			return Reading{}, err
 		}
 		out.Format = cp.Format
+		out.CopyRev = cp.Rev
+		out.Rev = max(out.Rev, cp.Rev)
 		if msgs, more, err = s.Store.CachedMessages(ctx, n.ID, key, cp, after, limit, PageBudget); err != nil {
 			return Reading{}, err
 		}

@@ -175,3 +175,14 @@ Things to know:
 - State lives in the data directory (`--data-dir`, default `hebi8xc` under the OS config directory, e.g. `~/.config/hebi8xc`). The node name defaults to the host name; `h8c name` shows and changes it.
 
 More in [docs/design.md](docs/design.md). What was checked about GitHub is in [docs/github-roster.md](docs/github-roster.md).
+
+### Search sessions and read around a hit
+
+```sh
+h8c search parser --project parser --json
+h8c search --file sessions/store.go --since 30d --by-session --json
+h8c search --file store.go --op any --failed --json
+h8c show desk/codex:example --around 41 --rev 7 --before 8 --after 2 --json
+```
+
+Search supports `--tool`, `--kind`, `--errors`, `--agent`, `--project`, `--node`, `--since`, `--until`, and `--limit` (up to 500). Terms are literal text. Every hit has a message id and revision; each node reports live, copies or none. `partial` means some data could not be searched. `--by-session` counts hits before limiting groups. Around reports `moved` for a stale revision; `show --all` includes meta messages. See [search semantics, limits and API fields](docs/design.md#search-and-anchors). The page search UI and agent skill are separate work.

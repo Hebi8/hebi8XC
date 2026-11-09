@@ -46,6 +46,8 @@ const usage = `usage: h8c [--data-dir DIR] <command>
                          list the agent sessions of all nodes, newest first
   export [--epoch E] [--after N] [--since W] [--ack N] [--limit N] --json
                          export local snapshots; W is Unix milliseconds
+  search [TERM...] [--file PATH] [--by-session] [--json]
+                         search message text, thinking and calls across nodes
   show NODE/KEY [--after ID] [--limit N] [--json]
                          read a session; the first column of "sessions" is NODE/KEY
   web                    print the link that opens the web interface in a browser
@@ -90,6 +92,8 @@ func run(args []string, out io.Writer) error {
 		return showVersion(out)
 	case "web":
 		return webLink(*dataDir, out)
+	case "search":
+		return searchSessions(*dataDir, args[1:], out)
 	case "sessions":
 		return listSessions(*dataDir, args[1:], out)
 	case "export":

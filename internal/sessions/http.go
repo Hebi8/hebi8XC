@@ -1,17 +1,20 @@
 package sessions
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // PeerRoutes adds what this node offers other nodes: its feed and the
 // messages of its sessions. The mux must only be reachable by nodes in the
 // roster.
 func (s *Service) PeerRoutes(mux *http.ServeMux) {
+	s.searchRoute(mux, true)
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
@@ -52,6 +55,7 @@ func (s *Service) ControlRoutes(mux *http.ServeMux) {
 
 // ReadRoutes exposes only listing and reading, also used by the web interface.
 func (s *Service) ReadRoutes(mux *http.ServeMux) {
+	s.searchRoute(mux, false)
 	mux.HandleFunc("GET /v1/sessions", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		since, _ := strconv.ParseInt(q.Get("since"), 10, 64)
@@ -62,15 +66,43 @@ func (s *Service) ReadRoutes(mux *http.ServeMux) {
 		})
 		answer(w, list, err)
 	})
-	mux.HandleFunc("GET /v1/sessions/messages", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("GET /v1/sessions/messages", http.TimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		after, _ := strconv.ParseInt(q.Get("after"), 10, 64)
-		reading, err := s.Read(r.Context(), q.Get("node"), q.Get("key"), after, limitParam(q.Get("limit"), 50))
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		var reading Reading
+		var err error
+		if q.Has("around") {
+			var id int64
+			var before, following int
+			var rev *int64
+			id, err = strconv.ParseInt(q.Get("around"), 10, 64)
+			before, following = 8, 2
+			if err == nil && q.Has("before") {
+				before, err = strconv.Atoi(q.Get("before"))
+			}
+			if err == nil && q.Has("after") {
+				following, err = strconv.Atoi(q.Get("after"))
+			}
+			if err == nil && q.Has("rev") {
+				var n int64
+				n, err = strconv.ParseInt(q.Get("rev"), 10, 64)
+				rev = &n
+			}
+			if err != nil || id < 1 || before < 0 || following < 0 || before >= MaxPage || following > MaxPage-1-before {
+				http.Error(w, "around requires a positive id and a window of at most 500 messages", http.StatusBadRequest)
+				return
+			}
+			reading, err = s.Around(ctx, q.Get("node"), q.Get("key"), id, before, following, rev)
+		} else {
+			reading, err = s.Read(ctx, q.Get("node"), q.Get("key"), after, limitParam(q.Get("limit"), 50))
+		}
 		if code := Code(err); code != "" {
 			w.Header().Set(ErrorHeader, code)
 		}
 		answer(w, reading, err)
-	})
+	}), 10*time.Second, "session read exceeded ten seconds; narrow the window"))
 }
 
 func answer(w http.ResponseWriter, v any, err error) {
@@ -89,4 +121,23 @@ func answer(w http.ResponseWriter, v any, err error) {
 	default:
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (s *Service) searchRoute(mux *http.ServeMux, local bool) {
+	mux.Handle("GET /v1/sessions/search", http.TimeoutHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q, err := ParseSearch(r.URL.Query())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		if local {
+			pg, err := s.LocalSearch(ctx, q)
+			answer(w, pg, err)
+		} else {
+			pg, err := s.Search(ctx, q)
+			answer(w, pg, err)
+		}
+	}), 10*time.Second, "search exceeded ten seconds; narrow the query"))
 }

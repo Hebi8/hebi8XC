@@ -1,0 +1,9 @@
+{
+  "hits": [{
+    "ref": "desk/codex:example", "key": "codex:example", "node": "desk", "node_id": "desk",
+    "id": 2, "rev": 1, "call": 0, "time": 1000, "kind": "text", "tool": "edit",
+    "snippet": "parser change", "files": [{"path": "/home/alice/project/sessions/store.go", "op": "change"}],
+    "title": "Fix the parser", "project": "parser", "updated_at": 1000
+  }],
+  "more": false
+}

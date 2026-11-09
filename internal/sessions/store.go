@@ -137,6 +137,10 @@ func OpenStore(path string, now func() time.Time) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := s.migrateSearch(); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := s.Epoch(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)

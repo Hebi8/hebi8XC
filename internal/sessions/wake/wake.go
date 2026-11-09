@@ -281,6 +281,10 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 			x.fail(db)
 		}
 	}()
+	return x.messages(ctx, tx, key, after, limit, budget, false)
+}
+
+func (x *Index) messages(ctx context.Context, tx *sql.Tx, key string, after int64, limit, budget int, indexedText bool) ([]sessions.Message, bool, error) {
 	structured, err := x.structure(ctx, tx)
 	if err != nil {
 		return nil, false, err
@@ -297,7 +301,9 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 	}
 	text, extra, join := "m.text", "0, '', '', ''", ""
 	if valid {
-		text = "coalesce(e.full_text,m.text)"
+		if !indexedText {
+			text = "coalesce(e.full_text,m.text)"
+		}
 		extra = "0, coalesce(e.kind,'text'),coalesce(e.thinking,''),coalesce(e.model,'')"
 		join = " LEFT JOIN message_extras e ON e.session_key=m.session_key AND e.seq=m.seq"
 	}
