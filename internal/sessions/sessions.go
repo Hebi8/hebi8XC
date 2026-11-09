@@ -38,10 +38,13 @@ type Session struct {
 	// Stamp changes whenever the content of the session may have changed.
 	// It stays on the machine.
 	Stamp string `json:"-"`
+	// Structure is the local source level: 0 text, 1 calls/thinking, 2 usage/files.
+	Structure int `json:"-"`
 }
 
 // Message is one message of a session.
 type Message struct {
+	Structure int `json:"-"` // local source level, not a protocol field
 	// ID grows from one message of a session to the next. It is the cursor
 	// for reading a session in pages and has no other meaning.
 	ID           int64  `json:"id"`

@@ -159,7 +159,7 @@ func (f *exportFixture) number(query string) int64 {
 }
 
 func exportMessage(id, seq int64, text string) sessions.Message {
-	return sessions.Message{ID: id, Seq: seq, Role: "assistant", Time: 10 + seq, Text: text, Kind: "text"}
+	return sessions.Message{ID: id, Seq: seq, Role: "assistant", Time: 10 + seq, Text: text, Kind: "text", Structure: 1}
 }
 
 func TestExportSnapshotsChangesAndDeletion(t *testing.T) {
@@ -184,8 +184,10 @@ func TestExportSnapshotsChangesAndDeletion(t *testing.T) {
 	if len(initial.Items) != 2 || initial.More || initial.Next != 2 || initial.Epoch == "" {
 		t.Fatalf("initial page: %+v", initial)
 	}
+	wireMessage := m
+	wireMessage.Structure = 0
 	if initial.Items[0].Type != "session" || initial.Items[0].Message != nil || initial.Items[0].Session.Messages != 1 ||
-		initial.Items[1].Type != "message" || initial.Items[1].Session != nil || !reflect.DeepEqual(*initial.Items[1].Message, m) {
+		initial.Items[1].Type != "message" || initial.Items[1].Session != nil || !reflect.DeepEqual(*initial.Items[1].Message, wireMessage) {
 		t.Fatal("snapshot shape or complete message changed")
 	}
 	for _, item := range initial.Items {
@@ -563,7 +565,7 @@ func TestExportSchemaMigrationOnce(t *testing.T) {
 	f.sql(`INSERT INTO nodes(node,name,epoch,cursor,synced_at) VALUES ('remote','remote','peer-epoch',99,1000)`)
 	// Reproduce a Phase 1 store, without changing its feed or identity.
 	f.sql(`DROP TABLE export_log; DROP TABLE export_scan; DROP TABLE export_messages; DROP TABLE export_state;
- ALTER TABLE sessions DROP COLUMN tokens; ALTER TABLE sessions DROP COLUMN files;
+ ALTER TABLE sessions DROP COLUMN tokens; ALTER TABLE sessions DROP COLUMN files; ALTER TABLE sessions DROP COLUMN structure;
  UPDATE meta SET v='1' WHERE k='schema'`)
 	f.restart()
 	if f.number(`SELECT v FROM meta WHERE k='schema'`) != 2 {
@@ -672,6 +674,14 @@ func TestExportBaselineStampOnly(t *testing.T) {
 	f.refresh()
 	if len(f.page(sessions.ExportOptions{}).Items) != 0 || f.number(`SELECT logged FROM export_scan WHERE key='agent:old'`) != 0 {
 		t.Fatal("stamp-only change exported history")
+	}
+	meta := f.src.entries["agent:old"]
+	meta.Title = "new title"
+	meta.Archived = true
+	f.src.entries["agent:old"] = meta
+	f.refresh()
+	if len(f.page(sessions.ExportOptions{}).Items) != 0 {
+		t.Fatal("metadata-only baseline exported")
 	}
 	f.src.rows["agent:old"][0].Text = "changed"
 	f.src.changed("agent:old")
@@ -826,4 +836,186 @@ func TestExportDefersRenumberingWhileDegraded(t *testing.T) {
 	if len(restored.Items) != 3 || restored.Items[0].G != 1 || restored.Items[1].Message.Text != rich.Text {
 		t.Fatal("full new generation missing", restored)
 	}
+}
+
+func TestExportFirstBaselineChangeDuringDegradation(t *testing.T) {
+	f := newExportFixture(t)
+	const key = "agent:old"
+	old := exportMessage(1, 1, "full history")
+	old.Structure = 2
+	old.Usage = &sessions.Usage{Input: 7}
+	f.src.put(key, 10, old)
+	w := int64(100)
+	if len(f.page(sessions.ExportOptions{Since: &w}).Items) != 0 {
+		t.Fatal("baseline exported")
+	}
+	plain := old
+	plain.Structure = 0
+	plain.Kind = ""
+	plain.Usage = nil
+	plain.Text = "prefix"
+	f.src.rows[key] = []sessions.Message{plain}
+	f.src.changed(key)
+	f.refresh()
+	if len(f.page(sessions.ExportOptions{}).Items) != 0 || f.number(`SELECT structured FROM export_messages WHERE key='agent:old' AND seq=1`) != 2 {
+		t.Fatal("downgrade changed baseline")
+	}
+	next := sessions.Message{ID: 2, Seq: 2, Role: "user", Time: 200, Text: "continue"}
+	f.src.rows[key] = append(f.src.rows[key], next)
+	f.src.changed(key)
+	f.refresh()
+	first := f.page(sessions.ExportOptions{})
+	if len(first.Items) != 3 || first.Items[1].Message.Text != "prefix" || first.Items[2].Message.Text != "continue" || f.number(`SELECT structured FROM export_messages WHERE key='agent:old' AND seq=1`) != 0 {
+		t.Fatal("first emission lost baseline history", first)
+	}
+	f.src.rows[key][0] = old
+	f.src.rows[key][1].Kind = "text"
+	f.src.rows[key][1].Structure = 2
+	f.src.changed(key)
+	f.refresh()
+	restored := f.page(sessions.ExportOptions{After: first.Next})
+	if len(restored.Items) != 3 || restored.Items[1].Message.Text != "full history" || restored.Items[1].Message.Usage == nil {
+		t.Fatal("baseline history never recovered", restored)
+	}
+}
+
+func TestExportInitializationIncludesSourceAheadOfFeed(t *testing.T) {
+	f := newExportFixture(t)
+	const key = "agent:old"
+	f.src.put(key, 10, exportMessage(1, 1, "old"))
+	f.src.beforeRead = func(k string) {
+		f.src.beforeRead = nil
+		f.src.rows[k] = append(f.src.rows[k], sessions.Message{ID: 2, Seq: 2, Role: "user", Time: 100, Text: "arrived after watermark"})
+	}
+	w := int64(100)
+	page := f.page(sessions.ExportOptions{Since: &w})
+	if len(page.Items) != 3 || page.Items[2].Message.Text != "arrived after watermark" {
+		t.Fatal("source advanced into baseline", page)
+	}
+	f.src.changed(key)
+	f.refresh()
+	after := f.page(sessions.ExportOptions{After: page.Next})
+	if len(after.Items) != 1 || after.Items[0].Type != "session" {
+		t.Fatal("feed catchup changed message delivery", after)
+	}
+}
+
+func TestExportFormatRollbackPreservesLevelTwo(t *testing.T) {
+	f := newExportFixture(t)
+	d := waketest.New(t, t.TempDir())
+	const key = "codex:example"
+	total := int64(19)
+	d.Put(waketest.Session{Key: key, Agent: "codex", Tokens: &total}, waketest.Message{Role: "assistant", Text: "answer", Time: 10})
+	d.Structure(key, 1, sessions.Message{Usage: &sessions.Usage{Input: 7}, Calls: []sessions.Call{{Tool: "edit", Files: []sessions.File{{Path: "/home/alice/a.go", Op: "change"}}}}})
+	x := wake.Open(d.Path)
+	defer x.Close()
+	f.svc.Source = x
+	first := f.page(sessions.ExportOptions{})
+	d.Exec(`UPDATE schema_meta SET value='1' WHERE key='structure_format'; UPDATE structure_sessions SET format='1'`)
+	f.refresh()
+	rollback := f.page(sessions.ExportOptions{After: first.Next})
+	if len(rollback.Items) != 1 || rollback.Items[0].Session.Tokens.Input == nil || *rollback.Items[0].Session.Tokens.Input != 7 || len(rollback.Items[0].Session.Files) != 1 || f.number(`SELECT structured FROM export_messages WHERE key='codex:example'`) != 2 {
+		t.Fatal("format rollback erased phase 2", rollback)
+	}
+	d.Exec(`UPDATE schema_meta SET value='2' WHERE key='structure_format'; UPDATE structure_sessions SET format='2'`)
+	f.refresh()
+	recovered := f.page(sessions.ExportOptions{After: rollback.Next})
+	if len(recovered.Items) != 1 {
+		t.Fatal("unchanged rich message resent", recovered)
+	}
+}
+
+func TestExportEmptySessionDowngrade(t *testing.T) {
+	f := newExportFixture(t)
+	const key = "agent:empty"
+	f.src.put(key, 10)
+	zero := int64(0)
+	count := int64(7)
+	meta := f.src.entries[key]
+	meta.Structure = 2
+	meta.ToolCalls = &zero
+	meta.Tokens = &sessions.Tokens{Total: &count}
+	f.src.entries[key] = meta
+	first := f.page(sessions.ExportOptions{})
+	meta.Structure = 0
+	meta.ToolCalls = nil
+	meta.Tokens = nil
+	meta.Stamp += "changed"
+	f.src.entries[key] = meta
+	f.refresh()
+	page := f.page(sessions.ExportOptions{After: first.Next})
+	if len(page.Items) != 1 || page.Items[0].Session.ToolCalls == nil || page.Items[0].Session.Tokens == nil || f.number(`SELECT structured FROM export_scan WHERE key='agent:empty'`) != 2 {
+		t.Fatal("empty-session downgrade lost metadata", page)
+	}
+}
+
+func TestExportEpochMismatchEmptyPageStartsAtZero(t *testing.T) {
+	f := newExportFixture(t)
+	f.page(sessions.ExportOptions{})
+	ack := int64(99)
+	page := f.page(sessions.ExportOptions{Epoch: "old-store", After: 99, Ack: &ack})
+	if len(page.Items) != 0 || page.Next != 0 || page.More {
+		t.Fatal("old cursor leaked into empty page", page)
+	}
+}
+
+func TestExportCancellationStopsSessionLoop(t *testing.T) {
+	f := newExportFixture(t)
+	for _, key := range []string{"agent:a", "agent:b", "agent:c"} {
+		f.src.put(key, 10, exportMessage(1, 1, "text"))
+	}
+	ctx, cancel := context.WithCancel(exportContext)
+	defer cancel()
+	f.src.beforeRead = func(string) { cancel() }
+	f.src.readErr = context.Canceled
+	if _, err := f.svc.Export(ctx, sessions.ExportOptions{}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if f.src.reads != 1 || strings.Count(f.logs.String(), "export session") != 1 {
+		t.Fatal("continued reading after cancellation", f.src.reads, f.logs.String())
+	}
+}
+
+func TestExportBatchSavepointIsolatesFailure(t *testing.T) {
+	f := newExportFixture(t)
+	for _, key := range []string{"agent:a", "agent:b", "agent:c"} {
+		f.src.put(key, 10, exportMessage(1, 1, "text"))
+	}
+	f.sql(`CREATE TRIGGER fail_one BEFORE INSERT ON export_scan WHEN NEW.key='agent:b' BEGIN SELECT RAISE(ABORT,'one failure'); END`)
+	page := f.page(sessions.ExportOptions{})
+	if len(page.Items) != 4 || page.Items[0].Key != "agent:a" || page.Items[2].Key != "agent:c" || f.number(`SELECT count(*) FROM export_messages WHERE key='agent:b'`) != 0 {
+		t.Fatal("failed session affected neighbours", page)
+	}
+	f.sql(`DROP TRIGGER fail_one`)
+	f.refresh()
+	next := f.page(sessions.ExportOptions{After: page.Next})
+	if len(next.Items) != 2 || next.Items[0].Key != "agent:b" {
+		t.Fatal("failed session not retried", next)
+	}
+}
+
+func TestExportBatchBoundaries(t *testing.T) {
+	t.Run("session count", func(t *testing.T) {
+		f := newExportFixture(t)
+		for i := 0; i < 101; i++ {
+			f.src.put(fmt.Sprintf("agent:%03d", i), 10)
+		}
+		f.src.beforeRead = func(key string) {
+			if key == "agent:100" && f.number(`SELECT count(*) FROM export_scan`) != 100 {
+				t.Fatal("first 100 sessions not committed before next source read")
+			}
+		}
+		f.page(sessions.ExportOptions{})
+	})
+	t.Run("byte budget", func(t *testing.T) {
+		f := newExportFixture(t)
+		f.src.put("agent:a", 10, exportMessage(1, 1, strings.Repeat("x", sessions.PageBudget)))
+		f.src.put("agent:b", 10)
+		f.src.beforeRead = func(key string) {
+			if key == "agent:b" && f.number(`SELECT count(*) FROM export_scan`) != 1 {
+				t.Fatal("full byte budget not committed before next source read")
+			}
+		}
+		f.page(sessions.ExportOptions{})
+	})
 }

@@ -209,7 +209,7 @@ func (s *Service) refreshLocal(ctx context.Context) error {
 }
 
 // Export returns immutable local snapshots, never peer copies. The first call
-// refreshes the local feed, establishes Since and scans its baseline by session.
+// refreshes the local feed, establishes Since and scans its baseline in bounded batches.
 // Further calls read the log even if the index is temporarily unavailable;
 // RefreshLocal (also called by SyncLocal) appends subsequent changes.
 func (s *Service) Export(ctx context.Context, options ExportOptions) (ExportPage, error) {

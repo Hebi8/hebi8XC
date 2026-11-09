@@ -285,6 +285,7 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 		return s, err
 	}
 	if hasTranscript {
+		s.Structure = 2
 		s.ToolCalls = &calls
 		s.ToolErrors = &errs
 	}
@@ -353,6 +354,7 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 		m := structure[idx].Message
 		m.ID, m.Seq, m.Role = idx+1, idx, role
 		if hasTranscript {
+			m.Structure = 2
 			m.Kind = "text"
 			model, err := blob(ctx, tx, "steps", "metadata", idx, ms).child(24)
 			if err != nil {

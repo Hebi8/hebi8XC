@@ -243,6 +243,10 @@ func (x *Index) Sessions(ctx context.Context) (result []sessions.Session, err er
 		s.Reader = "wake"
 		s.Stamp = fmt.Sprintf("%d:%d:%s:%s:%t:%s", mtime, size, stamp, fts, valid, structured)
 		if valid {
+			s.Structure = 1
+			if structured == "2" {
+				s.Structure = 2
+			}
 			s.ToolCalls = &calls
 			s.ToolErrors = &errs
 			if structured == "2" {
@@ -320,6 +324,10 @@ func (x *Index) Messages(ctx context.Context, key string, after int64, limit, bu
 			return out, true, nil
 		}
 		if valid {
+			m.Structure = 1
+			if structured == "2" {
+				m.Structure = 2
+			}
 			calls, err := tx.QueryContext(ctx, `SELECT idx,call_id,name,coalesce(input,''),coalesce(output,''),is_error,coalesce(child_id,'') FROM tool_calls WHERE session_key=? AND seq=? ORDER BY idx`, key, m.Seq)
 			if err != nil {
 				return nil, false, err

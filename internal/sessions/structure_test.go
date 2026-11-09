@@ -99,7 +99,7 @@ func removeStructureSchema(t *testing.T, store *Store) {
 	// Drop structured-session additions to reproduce a stock store with a feed.
 	for _, q := range []string{
 		"DELETE FROM meta WHERE k='schema'",
-		"ALTER TABLE sessions DROP COLUMN tokens", "ALTER TABLE sessions DROP COLUMN files",
+		"ALTER TABLE sessions DROP COLUMN tokens", "ALTER TABLE sessions DROP COLUMN files", "ALTER TABLE sessions DROP COLUMN structure",
 		"DROP TABLE export_log", "DROP TABLE export_state", "DROP TABLE export_scan", "DROP TABLE export_messages",
 		"ALTER TABLE sessions DROP COLUMN app", "ALTER TABLE sessions DROP COLUMN reader", "ALTER TABLE sessions DROP COLUMN tool_calls", "ALTER TABLE sessions DROP COLUMN tool_errors",
 		"ALTER TABLE content DROP COLUMN format",

@@ -231,7 +231,7 @@ func (s *Store) SetLocal(ctx context.Context, self string, current []Session) (c
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE sessions SET rev = ?, deleted = 1, print = '', title = '', project = '', project_path = '',
 			       branch = '', model = '', parent = '', messages = 0,
-			       app = '', reader = '', tool_calls = NULL, tool_errors = NULL, tokens = 'null', files = 'null'
+			       app = '', reader = '', tool_calls = NULL, tool_errors = NULL, tokens = 'null', files = 'null', structure = 0
 			WHERE node = ? AND key = ?`, rev, self, key); err != nil {
 			return 0, err
 		}
@@ -244,16 +244,16 @@ func upsert(ctx context.Context, tx *sql.Tx, node string, sess Session, rev int6
 	files, _ := json.Marshal(sess.Files)
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO sessions(node, key, rev, deleted, print, agent, title, project, project_path, branch,
-		                     model, created_at, updated_at, messages, parent, spawned, archived, app, reader, tool_calls, tool_errors, tokens, files)
-		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                     model, created_at, updated_at, messages, parent, spawned, archived, app, reader, tool_calls, tool_errors, tokens, files, structure)
+		VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(node, key) DO UPDATE SET
 		  rev = excluded.rev, deleted = 0, print = excluded.print, agent = excluded.agent,
 		  title = excluded.title, project = excluded.project, project_path = excluded.project_path,
 		  branch = excluded.branch, model = excluded.model, created_at = excluded.created_at,
 		  updated_at = excluded.updated_at, messages = excluded.messages, parent = excluded.parent,
-		  spawned = excluded.spawned, archived = excluded.archived, app=excluded.app, reader=excluded.reader, tool_calls=excluded.tool_calls, tool_errors=excluded.tool_errors, tokens=excluded.tokens, files=excluded.files`,
+		  spawned = excluded.spawned, archived = excluded.archived, app=excluded.app, reader=excluded.reader, tool_calls=excluded.tool_calls, tool_errors=excluded.tool_errors, tokens=excluded.tokens, files=excluded.files, structure=excluded.structure`,
 		node, sess.Key, rev, p, sess.Agent, sess.Title, sess.Project, sess.ProjectPath, sess.Branch,
-		sess.Model, sess.CreatedAt, sess.UpdatedAt, sess.Messages, sess.Parent, sess.Spawned, sess.Archived, sess.App, sess.Reader, sess.ToolCalls, sess.ToolErrors, string(tokens), string(files))
+		sess.Model, sess.CreatedAt, sess.UpdatedAt, sess.Messages, sess.Parent, sess.Spawned, sess.Archived, sess.App, sess.Reader, sess.ToolCalls, sess.ToolErrors, string(tokens), string(files), sess.Structure)
 	return err
 }
 
@@ -277,14 +277,14 @@ type Change struct {
 }
 
 const sessionColumns = `key, agent, title, project, project_path, branch, model,
-	created_at, updated_at, messages, parent, spawned, archived, app, reader, tool_calls, tool_errors, tokens, files`
+	created_at, updated_at, messages, parent, spawned, archived, app, reader, tool_calls, tool_errors, tokens, files, structure`
 
 func scanSession(scan func(...any) error, more ...any) (Session, error) {
 	var sess Session
 	var tokens, files string
 	dest := append([]any{&sess.Key, &sess.Agent, &sess.Title, &sess.Project, &sess.ProjectPath, &sess.Branch,
 		&sess.Model, &sess.CreatedAt, &sess.UpdatedAt, &sess.Messages, &sess.Parent, &sess.Spawned,
-		&sess.Archived, &sess.App, &sess.Reader, &sess.ToolCalls, &sess.ToolErrors, &tokens, &files}, more...)
+		&sess.Archived, &sess.App, &sess.Reader, &sess.ToolCalls, &sess.ToolErrors, &tokens, &files, &sess.Structure}, more...)
 	if err := scan(dest...); err != nil {
 		return sess, err
 	}
@@ -747,6 +747,7 @@ func (s *Store) migrateExport() error {
 	_, err = tx.Exec(`
 ALTER TABLE sessions ADD COLUMN tokens TEXT NOT NULL DEFAULT 'null';
 ALTER TABLE sessions ADD COLUMN files TEXT NOT NULL DEFAULT 'null';
+ALTER TABLE sessions ADD COLUMN structure INTEGER NOT NULL DEFAULT 0;
 UPDATE sessions SET print='';
 UPDATE nodes SET cursor=0;
 -- No row until the first export: startup refreshes must not defeat since.
@@ -765,7 +766,8 @@ CREATE TABLE IF NOT EXISTS export_scan (
   rev INTEGER NOT NULL,
   g INTEGER NOT NULL,
   logged INTEGER NOT NULL,
-  session TEXT NOT NULL
+  session TEXT NOT NULL,
+  structured INTEGER NOT NULL
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS export_messages (
   key TEXT NOT NULL,
