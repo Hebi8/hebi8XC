@@ -12,10 +12,13 @@
 // narrow window shows a session that cannot be read, and why, in the
 // reader's language. Of the search it checks that the places found are
 // the node's answer, that the page says how each machine was searched and
-// what is missing, that it says when there is more, and that a place found
-// opens its session there, marked and in view, with the messages before
-// and after it each shown once. Under a message it checks the calls: their
-// tools, failures and files shown, input and output folded until a click.
+// what is missing, when there is more, when nothing was found and when the
+// search failed, that a refresh asks again for the search on its way, and
+// that a place found opens its session there, marked and in view, with the
+// messages before and after it each shown once, earlier ones offered as
+// long as the node says there are some. Under a message it checks the
+// calls: their tools, failures and files shown, input and output folded
+// until a click.
 //
 // With -shots DIR it also writes pictures of the page there, narrow and
 // wide, in English and in Chinese, to look at after a change of the
@@ -80,6 +83,37 @@ func hostile(desk, _, _ *waketest.DB) {
 	}})
 }
 
+// Sessions whose messages are large as JSON though not in characters: the
+// node writes each "<" as six bytes. Around a message of heavyKey it sends
+// fewer messages than were asked for, and says with has_before that more
+// come before them. Two messages of hugeKey are too large to be sent
+// together, and an answer around the second always holds that one.
+const (
+	heavyKey = "claude:heavy"
+	hugeKey  = "claude:huge"
+)
+
+func heavy(desk *waketest.DB) {
+	now := time.Now().UnixMilli()
+	const minute = 60_000
+	var parts []waketest.Message
+	for i := range 30 {
+		parts = append(parts, waketest.Message{Role: "user", Time: now - int64(100-i)*minute,
+			Text: fmt.Sprintf("Part %d of the page:\n", i+1) + strings.Repeat("<", 35_000)})
+	}
+	desk.Put(waketest.Session{Key: heavyKey, Agent: "claude", Title: "A page of markup, pasted in parts",
+		Project: "atlas", Path: "/home/alice/src/atlas", UpdatedAt: now - 70*minute}, parts...)
+	desk.Put(waketest.Session{Key: hugeKey, Agent: "claude", Title: "Two exports of the page, whole",
+		Project: "atlas", Path: "/home/alice/src/atlas", UpdatedAt: now - 66*minute},
+		waketest.Message{Role: "user", Time: now - 69*minute, Text: "Here are both exports."},
+		waketest.Message{Role: "user", Time: now - 68*minute, Text: "The first:\n" + strings.Repeat("<", 190_000)},
+		waketest.Message{Role: "user", Time: now - 67*minute, Text: "The second:\n" + strings.Repeat("<", 190_000)},
+		waketest.Message{Role: "assistant", Time: now - 66*minute, Text: "They are the same."})
+	// Like the rest of desk, they have their structure, of no calls.
+	desk.SealStructure(heavyKey)
+	desk.SealStructure(hugeKey)
+}
+
 type checker struct {
 	c      *chrome
 	failed int
@@ -132,6 +166,21 @@ type found struct {
 		ID  int64 `json:"id"`
 		Rev int64 `json:"rev"`
 	} `json:"hits"`
+	Groups []struct {
+		Hits int `json:"hits"`
+	} `json:"groups"`
+}
+
+// window is what the node itself answers when asked around a message.
+type window struct {
+	Seqs      []string `json:"seqs"`
+	HasBefore bool     `json:"has_before"`
+}
+
+// message is a message of a session: its id, and the revision it was read at.
+type message struct {
+	ID  int64 `json:"id"`
+	Rev int64 `json:"rev"`
 }
 
 // anchor is the message the page marks as a place found.
@@ -143,11 +192,30 @@ type anchor struct {
 	InView bool   `json:"inView"`
 }
 
-// none is an answer to a search in which attic was not searched at all and
-// says why: the demo, where attic has a copy, does not come to that.
+// none is an answer to a search in which attic was not searched at all,
+// as the node gives it when attic does not answer and nothing of it was
+// read here before: no place on attic, and its note. The demo, where attic
+// has a copy, does not come to that.
 func none(attic string) string {
-	return `__t.edit = (url, v) => url.includes('/sessions/search') ? { ...v, nodes: v.nodes.map(n => n.id === ` + q(attic) +
-		` ? { id: n.id, name: n.name, searched: 'none', note: 'peer search unavailable; searched held copies' } : n) } : v`
+	return `__t.edit = (url, v) => url.includes('/sessions/search') ? { ...v,
+		hits: v.hits.filter(h => h.node_id !== ` + q(attic) + `),
+		sessions: v.sessions && v.sessions.filter(g => g.node_id !== ` + q(attic) + `),
+		nodes: v.nodes.map(n => n.id === ` + q(attic) + ` ? { id: n.id, name: n.name, searched: 'none', note: 'peer search unavailable' } : n) } : v`
+}
+
+// stopped is an answer to a search in which laptop ran out of its budget
+// after it had searched its messages back to a day ago, as the node says
+// it. It returns that time as the page writes it.
+func stopped(laptop string) string {
+	return `(() => {
+		const through = new Date(Math.floor((Date.now() - 864e5) / 6e4) * 6e4);
+		const iso = through.toISOString().replace('.000Z', 'Z');
+		__t.edit = (url, v) => url.includes('/sessions/search') ? { ...v, nodes: v.nodes.map(n => n.id === ` + q(laptop) + ` ? { ...n, partial: true,
+			note: 'searched newest messages through ' + iso + '; search budget reached; results are incomplete; narrow the project, file or time range' } : n) } : v;
+		const form = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+		if (through.getFullYear() !== new Date().getFullYear()) form.year = 'numeric';
+		return through.toLocaleString(document.documentElement.lang, form);
+	})()`
 }
 
 func main() {
@@ -166,7 +234,10 @@ func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	n, err := demo.Start(ctx, demo.Options{Names: [3]string{"", hostileName, ""}, Seed: hostile})
+	n, err := demo.Start(ctx, demo.Options{Names: [3]string{"", hostileName, ""}, Seed: func(desk, laptop, attic *waketest.DB) {
+		hostile(desk, laptop, attic)
+		heavy(desk)
+	}})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "websmoke:", err)
 		return 2
@@ -334,17 +405,25 @@ func run() int {
 	k.check("they are on all three machines", on[desk] && on[laptop] && on[attic], places)
 	states := js[map[string]string](k, `__t.states()`)
 	k.check("desk and laptop answered it themselves", states[desk] == "live" && states[laptop] == "live", states)
-	k.check("attic was searched in the copies kept of it, and that is said to be incomplete", states[attic] == "copies+partial", states)
-	k.check("the page says what is missing from attic", strings.Contains(row(attic), "only the sessions read on this machine before") &&
-		strings.Contains(row(attic), "matches may be missing"), row(attic))
-	k.check("a call found names its tool and its files", js[bool](k, `__t.found('q=`+d.Term+`').then(f => {
+	// Attic keeps an index of text only. For words that is enough: what is
+	// held of it is searched in full.
+	k.check("attic was searched in the copies kept of it, in full for words", states[attic] == "copies", states)
+	k.check("the page says what was searched of attic, and nothing more", strings.Contains(row(attic), "only the sessions read on this machine before") &&
+		!strings.Contains(row(attic), "may be missing"), row(attic))
+	k.check("a call found names its tool and its files, from the project", js[bool](k, `__t.found('q=`+d.Term+`').then(f => {
 		const calls = f.hits.filter(h => h.call !== undefined);
-		return calls.length > 0 && calls.every(h => {
+		return calls.length > 0 && calls.some(h => (h.files || []).length) && calls.every(h => {
 			const li = [...document.querySelectorAll('#hits > li')].find(li => li.dataset.key === h.key && li.dataset.at === String(h.id) && li.dataset.call === String(h.call));
+			const files = h.files || [];
+			const inside = p => h.project_path && p.startsWith(h.project_path + '/') ? p.slice(h.project_path.length + 1) : p;
 			return li.querySelector('.call .tool').textContent === h.tool &&
-				[...li.querySelectorAll('.call .file')].map(e => e.title).join('\n') === (h.files || []).map(f => f.path).join('\n');
+				[...li.querySelectorAll('.call .file')].map(e => e.title).join('\n') === files.map(f => f.path).join('\n') &&
+				[...li.querySelectorAll('.call .file .path')].map(e => e.textContent).join('\n') === files.map(f => inside(f.path)).join('\n') &&
+				files.every(f => inside(f.path) !== f.path);
 		});
 	})`))
+	k.check("each place names the agent and the project the node gave it", js[bool](k, `__t.found('q=`+d.Term+`').then(f =>
+		f.hits.length > 0 && f.hits.every((h, i) => h.agent && document.querySelectorAll('#hits > li')[i].querySelector('.grow').textContent === [h.agent, h.project].filter(Boolean).join(' · ')))`))
 	k.check("in every snippet the word found is marked", js[bool](k, `[...document.querySelectorAll('#hits .snip')].every(p =>
 		p.querySelectorAll('mark').length > 0 && [...p.querySelectorAll('mark')].every(m => m.textContent.toLowerCase() === `+q(d.Term)+`))`))
 	now = js[string](k, `document.title`)
@@ -357,7 +436,17 @@ func run() int {
 	grouped := js[found](k, `__t.found('q=`+d.Term+`&by_session=true')`)
 	places = js[[]string](k, `__t.places()`)
 	k.check("one row per session, as the node grouped them", len(grouped.Places) > 1 && reflect.DeepEqual(places, grouped.Places), places, grouped.Places)
-	k.check("each row says how many matches it holds", js[bool](k, `[...document.querySelectorAll('#hits > li')].every(li => /^\d+ match(es)?$/.test(li.querySelector('.count').textContent))`))
+	var counts []string
+	for _, g := range grouped.Groups {
+		if g.Hits == 1 {
+			counts = append(counts, "1 match")
+		} else {
+			counts = append(counts, fmt.Sprintf("%d matches", g.Hits))
+		}
+	}
+	shownCounts := js[[]string](k, `[...document.querySelectorAll('#hits > li')].map(li => li.querySelector('.count').textContent)`)
+	k.check("each row says how many matches the node counted in it", len(counts) > 1 && reflect.DeepEqual(shownCounts, counts) &&
+		strings.Join(counts, "") != strings.Repeat("1 match", len(counts)), shownCounts, counts)
 	k.check("above them, how many sessions there are", js[string](k, `document.getElementById('search-note').textContent`) == fmt.Sprintf("%d sessions", len(grouped.Places)))
 	k.check("unticked, it asks again for the places one by one", js[int](k, `__t.press('s-group')`) == 1)
 	searched()
@@ -405,6 +494,30 @@ func run() int {
 	k.check("back to any time, the range is put away and attic is found again", !js[bool](k, `__t.shown('s-from')`) &&
 		reflect.DeepEqual(js[[]string](k, `__t.places()`), term.Places))
 
+	fmt.Println("# a refresh while a new search is on its way")
+	broad := js[found](k, `__t.found('q=`+d.Broad+`')`)
+	js[int](k, `__t.type('s-q', `+q(d.Broad)+`)`)
+	from = js[int](k, `(__t.hold = true, __t.log.length)`)
+	k.check("the new search is asked", js[int](k, `__t.submit()`) == 1)
+	k.check("\"refresh\" asks for the list and for the search on its way, not the one on screen", js[int](k, `__t.press('refresh')`) == 2 &&
+		reflect.DeepEqual(js[[]string](k, `new URL(__t.log[__t.log.length - 1]).searchParams.getAll('q')`), []string{d.Broad}) &&
+		js[string](k, `new URL(__t.log[__t.log.length - 1]).searchParams.get('limit')`) == "50",
+		js[[]string](k, `__t.log.slice(`+fmt.Sprint(from)+`).map(url => new URL(url).search)`))
+	k.await(`__t.held.length === 3`)
+	k.c.eval(`__t.release(0)`, nil)
+	k.check("the first answer to it is not shown: the refresh asked after it", len(js[[]string](k, `__t.places()`)) == 0 &&
+		js[bool](k, `document.getElementById('s-go').disabled`))
+	k.c.eval(`__t.release(1)`, nil)
+	k.c.eval(`__t.release(2)`, nil)
+	k.await(`!document.getElementById('refresh').disabled`)
+	k.check("the places on screen are those of the new search, with its word marked", reflect.DeepEqual(js[[]string](k, `__t.places()`), broad.Places) &&
+		js[bool](k, `[...document.querySelectorAll('#hits .snip mark')].every(m => m.textContent.toLowerCase() === `+q(d.Broad)+`)`) &&
+		js[string](k, `document.getElementById('s-q').value`) == d.Broad, js[[]string](k, `__t.places()`))
+	k.c.eval(`__t.hold = false; __t.held = []`, nil)
+	js[int](k, `__t.type('s-q', `+q(d.Term)+`)`)
+	js[int](k, `__t.submit()`)
+	searched()
+
 	fmt.Println("# more than one answer holds")
 	js[int](k, `__t.type('s-q', `+q(d.Broad)+`)`)
 	k.check("a new search is asked", js[int](k, `__t.submit()`) == 1)
@@ -428,7 +541,87 @@ func run() int {
 	k.check("the page says it was not searched", js[map[string]string](k, `__t.states()`)[attic] == "none")
 	k.check("and why, and what the node said of it", strings.Contains(row(attic), "not searched") &&
 		strings.Contains(row(attic), "none of its sessions was read on this machine before") &&
-		strings.Contains(row(attic), "It says: peer search unavailable; searched held copies"), row(attic))
+		strings.HasSuffix(row(attic), "It says: peer search unavailable"), row(attic))
+	k.check("nothing of it is listed, and the rest is", !strings.Contains(strings.Join(js[[]string](k, `__t.places()`), " "), attic+"/") &&
+		len(js[[]string](k, `__t.places()`)) == len(term.Places)-strings.Count(strings.Join(term.Places, " "), attic+"/"), js[[]string](k, `__t.places()`))
+	k.check("a search not done everywhere that finds something says what it found", js[string](k, `__t.note()`) == fmt.Sprintf("%d matches", len(js[[]string](k, `__t.places()`))), js[string](k, `__t.note()`))
+
+	fmt.Println("# a machine that stopped early")
+	cut := js[string](k, stopped(laptop))
+	k.check("the search is asked", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.c.eval(`__t.edit = null`, nil)
+	k.check("the page says what came from it is incomplete", js[map[string]string](k, `__t.states()`)[laptop] == "live+partial" &&
+		strings.Contains(row(laptop), "matches may be missing"), js[map[string]string](k, `__t.states()`))
+	k.check("and how far back it searched, as a time of the reader's", cut != "" && strings.Contains(row(laptop), "Messages older than "+cut+" were not searched."), cut, row(laptop))
+	k.check("and the node's note as it came", strings.Contains(row(laptop), "It says: searched newest messages through ") &&
+		strings.Contains(row(laptop), "search budget reached"), row(laptop))
+
+	fmt.Println("# a file, of which attic's copies cannot say")
+	js[int](k, `__t.type('s-q', '')`)
+	js[int](k, `__t.type('s-file', `+q(d.File)+`)`)
+	k.check("the search is asked", js[int](k, `__t.submit()`) == 1)
+	searched()
+	byFile := js[found](k, `__t.found('file=`+url.QueryEscape(d.File)+`')`)
+	k.check("the places found are the node's answer", len(byFile.Places) > 0 && reflect.DeepEqual(js[[]string](k, `__t.places()`), byFile.Places), js[[]string](k, `__t.places()`), byFile.Places)
+	k.check("attic's copies have no calls: that is said to be incomplete", js[map[string]string](k, `__t.states()`)[attic] == "copies+partial" &&
+		strings.Contains(row(attic), "matches may be missing"), row(attic))
+	// The change to the file is made in the second message of Code: what
+	// the node sends around it reaches the first.
+	near := -1
+	for i, p := range byFile.Places {
+		if strings.HasPrefix(p, desk+"/"+d.Code+"#") {
+			near = i
+		}
+	}
+	if near < 0 || near >= len(byFile.Hits) {
+		k.check("the change is found in Code", false, byFile.Places)
+	} else {
+		k.c.eval(`__t.choose(`+q(byFile.Places[near])+`)`, nil)
+		k.await(`__t.anchor() && !document.getElementById('earlier').disabled`)
+		start := js[window](k, fmt.Sprintf(`__t.around(%s, %s, %d, 10, 10)`, q(desk), q(d.Code), byFile.Hits[near].ID))
+		k.check("a place near the start: the node says nothing comes before it, and \"earlier messages\" is not shown",
+			!start.HasBefore && js[anchor](k, `__t.anchor()`).Seq == "#2" && reflect.DeepEqual(js[[]string](k, `__t.seqs()`), start.Seqs) &&
+				len(start.Seqs) == 5 && !js[bool](k, `__t.shown('earlier')`), start, js[[]string](k, `__t.seqs()`))
+	}
+
+	fmt.Println("# nothing found")
+	js[int](k, `__t.type('s-file', '')`)
+	js[int](k, `__t.type('s-q', 'zyzzyva')`)
+	k.check("the search is asked", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.check("searched in full, the page says nothing was found", len(js[[]string](k, `__t.places()`)) == 0 && js[string](k, `__t.note()`) == "Nothing found." &&
+		js[map[string]string](k, `__t.states()`)[attic] == "copies", js[string](k, `__t.note()`))
+	js[int](k, `__t.type('s-q', '')`)
+	js[int](k, `__t.type('s-file', 'importer/missing.go')`)
+	k.check("a file found nowhere is asked for", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.check("searched in part, the page says that is no proof there is none", len(js[[]string](k, `__t.places()`)) == 0 &&
+		js[string](k, `__t.note()`) == "Nothing found. But the search was not complete, so that does not mean there is nothing." &&
+		js[map[string]string](k, `__t.states()`)[attic] == "copies+partial", js[string](k, `__t.note()`), js[map[string]string](k, `__t.states()`))
+	js[int](k, `__t.type('s-file', '')`)
+
+	fmt.Println("# a search that fails")
+	js[int](k, `__t.type('s-q', `+q(d.Term)+`)`)
+	k.check("dates the wrong way round are asked for", js[int](k, `(() => {
+		const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+		const now = new Date(), yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+		const s = document.getElementById('s-when');
+		s.value = 'range';
+		s.dispatchEvent(new Event('change', { bubbles: true }));
+		document.getElementById('s-from').value = ymd(now);
+		const before = __t.log.length;
+		const to = document.getElementById('s-to');
+		to.value = ymd(yesterday);
+		to.dispatchEvent(new Event('change', { bubbles: true }));
+		return __t.log.length - before; })()`) == 1)
+	searched()
+	k.check("the page says the search failed, and what the node said", js[string](k, `__t.note()`) == "Could not search: invalid search time range" &&
+		len(js[[]string](k, `__t.places()`)) == 0 && !js[bool](k, `__t.shown('search-nodes')`) && !js[bool](k, `__t.shown('search-more')`), js[string](k, `__t.note()`))
+	k.check("it can be asked again at once", !js[bool](k, `document.getElementById('s-go').disabled`))
+	k.c.eval(`(() => { const s = document.getElementById('s-when'); s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); })()`, nil)
+	searched()
+	k.check("and then it finds what it found before", reflect.DeepEqual(js[[]string](k, `__t.places()`), term.Places))
 
 	fmt.Println("# a place found opens its session there")
 	js[int](k, `__t.type('s-q', `+q(`"`+d.Anchor+`"`)+`)`)
@@ -475,6 +668,51 @@ func run() int {
 		k.check("the page says the place may have moved", strings.Contains(js[string](k, `document.getElementById('notes').textContent`), "the match may have moved") &&
 			js[anchor](k, `__t.anchor()`).Badge == "match, may have moved", js[string](k, `document.getElementById('notes').textContent`))
 	}
+
+	fmt.Println("# a window the node cut short by its size")
+	at := js[message](k, `__t.message(`+q(desk)+`, `+q(heavyKey)+`, 20)`)
+	cutShort := js[window](k, fmt.Sprintf(`__t.around(%s, %s, %d, 10, 10)`, q(desk), q(heavyKey), at.ID))
+	k.check("the node sends fewer messages than were asked for, from the place on, and says more come before",
+		at.ID > 0 && len(cutShort.Seqs) > 1 && len(cutShort.Seqs) < 11 && cutShort.Seqs[0] == "#20" && cutShort.HasBefore, fmt.Sprintf("%+v", cutShort))
+	k.c.eval(fmt.Sprintf(`__t.at(%s, %s, %d, %d)`, q(desk), q(heavyKey), at.ID, at.Rev), nil)
+	k.await(`__t.anchor() && !document.getElementById('earlier').disabled`)
+	k.check("the page shows what the node sent, the place first", reflect.DeepEqual(js[[]string](k, `__t.seqs()`), cutShort.Seqs) &&
+		js[anchor](k, `__t.anchor()`).Seq == "#20", js[[]string](k, `__t.seqs()`))
+	k.check("and offers \"earlier messages\", as the node says there are some", js[bool](k, `__t.shown('earlier')`))
+	heavyAll := js[[]string](k, `__t.messages(`+q(desk)+`, `+q(heavyKey)+`)`)
+	from = js[int](k, `__t.log.length`)
+	clicks := 0
+	for clicks < 30 && js[bool](k, `__t.shown('earlier')`) {
+		js[int](k, `__t.press('earlier')`)
+		clicks++
+		k.await(`!document.getElementById('earlier').disabled`)
+	}
+	k.check("more than one click is needed, and each asks once", clicks > 1 && js[int](k, `__t.log.length`)-from == clicks, clicks)
+	k.check("the earlier messages come above, every one once, to the first", len(heavyAll) == 30 && 19+len(cutShort.Seqs) <= 30 &&
+		reflect.DeepEqual(js[[]string](k, `__t.seqs()`), heavyAll[:19+len(cutShort.Seqs)]), js[[]string](k, `__t.seqs()`))
+	k.check("at the first message \"earlier messages\" is not shown, and a click on it asks nothing",
+		!js[bool](k, `__t.shown('earlier')`) && js[int](k, `__t.press('earlier')`) == 0)
+
+	fmt.Println("# two messages too large to be fetched together")
+	second := js[message](k, `__t.message(`+q(desk)+`, `+q(hugeKey)+`, 3)`)
+	k.c.eval(fmt.Sprintf(`__t.at(%s, %s, %d, %d)`, q(desk), q(hugeKey), second.ID, second.Rev), nil)
+	k.await(`__t.anchor() && !document.getElementById('earlier').disabled`)
+	k.check("the node sends the place alone, and says more come before", second.ID > 0 &&
+		reflect.DeepEqual(js[[]string](k, `__t.seqs()`), []string{"#3"}) && js[bool](k, `__t.shown('earlier')`), js[[]string](k, `__t.seqs()`))
+	k.check("\"earlier messages\" asks once", js[int](k, `__t.press('earlier')`) == 1)
+	k.await(`!document.getElementById('earlier').disabled`)
+	k.check("nothing can come above: the page says so, and offers to read from the start instead",
+		reflect.DeepEqual(js[[]string](k, `__t.seqs()`), []string{"#3"}) && !js[bool](k, `__t.shown('earlier')`) &&
+			strings.HasPrefix(js[string](k, `(document.querySelector('#notes .stuck') || {}).textContent || ''`), "The messages before these are too large") &&
+			js[bool](k, `Boolean(document.querySelector('#notes .stuck button'))`), js[string](k, `document.getElementById('notes').textContent`))
+	k.c.eval(`document.querySelector('#notes .stuck button').click()`, nil)
+	k.await(`!__t.anchor() && __t.seqs()[0] === '#1' && !document.getElementById('more-messages').disabled`)
+	for i := 0; i < 5 && js[bool](k, `__t.shown('more-messages')`); i++ {
+		js[int](k, `__t.press('more-messages')`)
+		k.await(`!document.getElementById('more-messages').disabled`)
+	}
+	k.check("from the start, \"load more\" goes through all of it", !strings.Contains(js[string](k, `location.hash`), "&at=") &&
+		reflect.DeepEqual(js[[]string](k, `__t.seqs()`), []string{"#1", "#2", "#3", "#4"}), js[[]string](k, `__t.seqs()`))
 
 	fmt.Println("# calls under a message")
 	k.c.eval(`__t.open(`+q(desk)+`, `+q(d.Code)+`)`, nil)
@@ -531,6 +769,43 @@ func run() int {
 		js[[]string](k, calls(4)+`.map(li => li.querySelector('.tool').textContent)`), []string{"shell"}) &&
 		js[int](k, calls(0)+`.length`)+js[int](k, calls(2)+`.length`)+js[int](k, calls(3)+`.length`) == 0)
 
+	fmt.Println("# the search form, wide and narrow")
+	open(home)
+	js[int](k, `__t.press('mode-search')`)
+	k.c.eval(`document.getElementById('s-more').open = true`, nil)
+	// The name of the operation on one line, its choice as wide as its text,
+	// its padding and its arrow, and failed attempts on the line below.
+	k.check("the operation on a file is on one line, its choice shows all it says, and failed attempts come below", js[bool](k, `(() => {
+		const label = document.getElementById('s-op-label'), s = document.getElementById('s-op'), cs = getComputedStyle(s);
+		const text = document.createElement('canvas').getContext('2d');
+		text.font = cs.font;
+		const need = text.measureText(s.selectedOptions[0].text).width + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 16;
+		return label.getClientRects().length === 1 && label.getBoundingClientRect().height < 1.6 * parseFloat(getComputedStyle(label).fontSize) &&
+			s.clientWidth >= need && document.getElementById('s-failed').getBoundingClientRect().top >= s.getBoundingClientRect().bottom; })()`),
+		js[string](k, `(() => { const l = document.getElementById('s-op-label').getBoundingClientRect(), s = document.getElementById('s-op'); return l.width + 'x' + l.height + ' select ' + s.clientWidth; })()`))
+	if err := c.view(390, "en-US"); err != nil {
+		k.check("a narrow window", false, err)
+	}
+	// A long session below makes the page scroll, and the scroll bar takes
+	// its width from the window.
+	open(home)
+	k.c.eval(`__t.open(`+q(laptop)+`, `+q(d.Long)+`)`, nil)
+	k.await(`__t.seqs().length === 50`)
+	k.check("the page scrolls", js[bool](k, `document.documentElement.clientWidth < innerWidth`), js[int](k, `document.documentElement.clientWidth`))
+	js[int](k, `__t.press('mode-search')`)
+	k.c.eval(`(() => { const s = document.getElementById('s-when'); s.value = 'range'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`, nil)
+	// What is wider than its line may still be inside the window, in the
+	// margin, until a scroll bar takes that: the dates have to fit their
+	// line. The window here is what is left of it beside a scroll bar.
+	k.check("in a narrow window the dates to give fit their line, and nothing of the form is wider than the window", js[bool](k, `(() => {
+		const range = document.getElementById('s-range');
+		return __t.shown('s-to') && range.scrollWidth <= range.clientWidth && [...range.children].every(l => l.scrollWidth <= l.clientWidth); })()`) &&
+		js[int](k, `[...document.querySelectorAll('#search *')].filter(e => e.getBoundingClientRect().right > document.documentElement.clientWidth + 0.5).length`) == 0 &&
+		js[bool](k, `document.documentElement.scrollWidth <= document.documentElement.clientWidth`),
+		js[string](k, `(() => { const r = document.getElementById('s-range'); return r.scrollWidth + '/' + r.clientWidth + ' ' + [...r.children].map(l => l.scrollWidth + '/' + l.clientWidth).join(' '); })()`),
+		js[[]string](k, `[...document.querySelectorAll('#search *')].filter(e => e.getBoundingClientRect().right > document.documentElement.clientWidth + 0.5).map(e => (e.id || e.tagName) + ' ' + Math.round(e.getBoundingClientRect().right))`),
+		js[int](k, `document.documentElement.clientWidth`))
+
 	fmt.Println("# a narrow window, in Chinese")
 	// unreadable opens, from the list of attic, the session of it that was
 	// never read, with a reader's click on its row.
@@ -582,7 +857,7 @@ func run() int {
 	k.check("the search is asked", js[int](k, `__t.submit()`) == 1)
 	searched()
 	k.check("the page says in Chinese how each machine was searched", strings.Contains(row(desk), "实时搜索") &&
-		strings.Contains(row(attic), "只搜了副本") && strings.Contains(row(attic), "结果不完整") && strings.Contains(row(attic), "可能漏掉了结果"), row(desk), row(attic))
+		strings.Contains(row(attic), "只搜了副本") && strings.Contains(row(attic), "以前读过") && !strings.Contains(row(attic), "结果不完整"), row(desk), row(attic))
 	k.check("no place found is wider than the window", js[int](k, `[...document.querySelectorAll('#hits > li')].filter(li => li.getBoundingClientRect().right > innerWidth).length`) == 0)
 	// Here laptop has the long name that tries to be markup, which is cut
 	// short as it should be; the names of the others fit.
@@ -601,6 +876,12 @@ func run() int {
 		return Boolean(li) && li.querySelector('details').open && [...li.querySelectorAll('.file .op')].every(e => ['修改', '删除', '读取'].includes(e.textContent));
 	})()`))
 	k.check("nothing in the reader is wider than the window", js[int](k, `[...document.querySelectorAll('#messages *')].filter(e => e.getBoundingClientRect().right > innerWidth + 1).length`) == 0)
+	js[int](k, `__t.type('s-q', '')`)
+	js[int](k, `__t.type('s-file', 'importer/missing.go')`)
+	k.check("a file found nowhere is asked for", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.check("the page says in Chinese that finding nothing in part is no proof", js[string](k, `__t.note()`) == "没有找到。但这次搜索不完整，不能说明没有。" &&
+		strings.Contains(row(attic), "结果不完整") && strings.Contains(row(attic), "可能漏掉了结果"), js[string](k, `__t.note()`), row(attic))
 
 	if *shots != "" {
 		fmt.Println("# pictures")
@@ -625,7 +906,10 @@ func run() int {
 // window, in English and in Chinese. After the list and a session that
 // cannot be read come the search, grouped and not, a place found opened in
 // its session, calls opened under a message, a machine that was not
-// searched, and the note that more was found than is listed.
+// searched, the note that more was found than is listed, nothing found in
+// full and in part, a search that failed, a machine that stopped early,
+// and a place near the start of its session, as found and after its
+// session changed.
 func pictures(ctx context.Context, k *checker, dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -636,7 +920,7 @@ func pictures(ctx context.Context, k *checker, dir string) error {
 	}
 	defer n.Close()
 	c := k.c
-	attic := n.Data.IDs[2]
+	desk, laptop, attic := n.Data.IDs[0], n.Data.IDs[1], n.Data.IDs[2]
 	home := n.URL[:strings.Index(n.URL, "?")]
 	shot := func(name string, whole bool) {
 		if err := c.shot(filepath.Join(dir, name+".png"), whole); err != nil {
@@ -690,6 +974,9 @@ func pictures(ctx context.Context, k *checker, dir string) error {
 			c.eval(`__t.choose(__t.places()[0])`, nil)
 			k.await(`__t.anchor() && !document.getElementById('earlier').disabled`)
 			shot(name+"9-anchor", false)
+			// Above it, "earlier messages": the node says there are some.
+			c.eval(`document.getElementById('reader-body').scrollIntoView()`, nil)
+			shot(name+"9-anchor-top", false)
 			// Calls under a message: the failed one and a change opened,
 			// with the thinking.
 			c.eval(`__t.open(`+q(n.Data.IDs[0])+`, `+q(n.Data.Code)+`)`, nil)
@@ -710,6 +997,50 @@ func pictures(ctx context.Context, k *checker, dir string) error {
 			shot(name+"11-not-searched", false)
 			c.eval(`document.getElementById('search-more').scrollIntoView({block: 'end'})`, nil)
 			shot(name+"12-more", false)
+			// Nothing found: searched in full, and in part.
+			c.eval(`__t.type('s-q', 'zyzzyva'); __t.submit()`, nil)
+			k.await(`__t.searched() && __t.places().length === 0`)
+			c.eval(`document.getElementById('modes').scrollIntoView()`, nil)
+			shot(name+"13-nothing-found", false)
+			c.eval(`__t.type('s-q', ''); __t.type('s-file', 'importer/missing.go'); __t.submit()`, nil)
+			k.await(`__t.searched() && __t.places().length === 0 && document.querySelector('#search-nodes [data-partial]')`)
+			c.eval(`document.getElementById('modes').scrollIntoView()`, nil)
+			shot(name+"14-nothing-found-in-part", false)
+			// A search that fails: the dates are the wrong way round.
+			c.eval(`(() => {
+				const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+				const now = new Date(), yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+				const s = document.getElementById('s-when');
+				s.value = 'range';
+				s.dispatchEvent(new Event('change', { bubbles: true }));
+				document.getElementById('s-from').value = ymd(now);
+				const to = document.getElementById('s-to');
+				to.value = ymd(yesterday);
+				to.dispatchEvent(new Event('change', { bubbles: true }));
+			})()`, nil)
+			k.await(`__t.searched() && __t.note().includes('invalid search time range')`)
+			c.eval(`document.getElementById('modes').scrollIntoView()`, nil)
+			shot(name+"15-failed", false)
+			// A machine that stopped early, a day back.
+			c.eval(`(() => { const s = document.getElementById('s-when'); s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); })()`, nil)
+			k.await(`__t.searched()`)
+			c.eval(stopped(laptop)+`; __t.type('s-file', ''); __t.type('s-q', `+q(n.Data.Term)+`); __t.submit()`, nil)
+			k.await(`__t.searched() && __t.places().length > 0`)
+			c.eval(`__t.edit = null; document.getElementById('modes').scrollIntoView()`, nil)
+			shot(name+"16-stopped-early", false)
+			// A place near the start of its session, with nothing before
+			// it; then the same place after its session changed.
+			code := q(desk + "/" + n.Data.Code + "#")
+			c.eval(`__t.type('s-q', ''); __t.type('s-file', `+q(n.Data.File)+`); __t.submit()`, nil)
+			k.await(`__t.searched() && __t.places().some(p => p.startsWith(` + code + `))`)
+			c.eval(`__t.choose(__t.places().find(p => p.startsWith(`+code+`)))`, nil)
+			k.await(`__t.anchor() && !document.getElementById('earlier').disabled`)
+			shot(name+"17-nothing-earlier", false)
+			c.eval(`(() => { const d = document.querySelector('#hits > li.selected').dataset;
+				__t.at(d.node, d.key, d.at, Number(d.rev) + 1000, d.call); })()`, nil)
+			k.await(`__t.anchor() && document.querySelector('#notes p') && !document.getElementById('earlier').disabled`)
+			c.eval(`document.getElementById('reader-body').scrollIntoView()`, nil)
+			shot(name+"18-moved", false)
 		}
 	}
 	fmt.Println("written to " + dir)

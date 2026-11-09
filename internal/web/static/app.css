@@ -119,13 +119,18 @@ summary { cursor: pointer; color: var(--dim); }
 #search > #s-q { flex-basis: 100%; }
 #search > #s-file { flex: 2 1 12rem; }
 #s-range:not([hidden]), #search .actions { display: flex; flex-basis: 100%; gap: 0.4rem; align-items: center; }
-#s-range label { display: flex; flex: 1 1 0; min-width: 0; gap: 0.3rem; align-items: center; color: var(--dim); }
+/* The two dates share a line where they fit, and take one each where not. */
+#s-range:not([hidden]) { flex-wrap: wrap; }
+#s-range label { display: flex; flex: 1 1 auto; min-width: 0; gap: 0.3rem; align-items: center; color: var(--dim); }
 #s-range input { flex: 1 1 auto; min-width: 0; }
 #s-more { flex-basis: 100%; font-size: 0.9rem; }
 #s-more .fields { display: flex; flex-wrap: wrap; gap: 0.4rem 0.75rem; margin-top: 0.4rem; align-items: center; }
 #s-more .fields > * { flex: 1 1 11rem; min-width: 0; }
-#s-more .fields > label:not(.check) { display: flex; gap: 0.4rem; align-items: center; color: var(--dim); }
-#s-more .fields select { flex: 1 1 auto; min-width: 0; }
+/* The operation on a file has a line of its own: its name does not break,
+   and its choice is as wide as what it says. What comes next starts below. */
+#s-more .fields > label:not(.check) { flex-basis: 100%; display: flex; gap: 0.4rem; align-items: center; }
+#s-more .fields > label:not(.check) > span { color: var(--dim); white-space: nowrap; }
+#s-more .fields > label:not(.check) > select { flex: 0 1 auto; min-width: 0; }
 #search .actions { justify-content: space-between; }
 .check { display: inline-flex; gap: 0.35rem; align-items: center; cursor: pointer; }
 .check input { margin: 0; padding: 0; }

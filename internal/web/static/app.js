@@ -9,6 +9,7 @@
   const zh = (navigator.language || '').toLowerCase().startsWith('zh');
   const lang = zh ? 'zh-CN' : 'en';
   const T = zh ? {
+    sep: '', // between two sentences
     refresh: '刷新',
     machines: n => `机器（${n}）`,
     thisMachine: '本机',
@@ -71,6 +72,7 @@
     searching: '搜索中…',
     found: (n, more, grouped) => (more ? '前 ' : '') + (grouped ? `${n} 个会话` : `${n} 处命中`),
     noHits: '没有找到。',
+    noHitsShort: '没有找到。但这次搜索不完整，不能说明没有。',
     searchFailed: msg => `搜索失败：${msg}`,
     hits: n => `${n} 处命中`,
     notAll: '结果没有全部列出。可以用文件、项目或时间范围缩小搜索。',
@@ -82,15 +84,20 @@
       copies: '它没有回答，只搜了本机以前读过的那些会话的副本。',
       none: '它没有回答，本机也没有读过它的会话。',
       noneSelf: '本机的会话没能搜索。',
+      unfinished: '对它的搜索没有完成，可能漏掉了它那里的结果。',
       partial: '有一部分内容没能完整搜索，可能漏掉了结果。',
     },
+    through: t => `早于 ${t} 的消息没有搜索。`,
     note: note => `说明：${note}`,
     // A session read around a place that was found.
     earlier: '更早的消息',
     match: '命中',
     matchMoved: '命中，位置可能变了',
     moved: '这个会话在搜索之后变过，命中的位置可能已经移动。',
-    nearest: '标出的是离它最近的消息。',
+    nearest: '原来那条消息已经不在了，标出的是它后面的一条。',
+    gone: '这个位置已经超出会话末尾，下面是会话最后的消息。',
+    tooLarge: '前面的消息太大，没法和这些一起取过来。',
+    fromStart: '从头阅读',
     kind: { meta: '元信息', compact: '压缩' },
     thinking: '思考过程',
     callFailed: '失败',
@@ -102,6 +109,7 @@
     subagent: key => `启动了会话 ${key}`,
     dropped: n => `还有 ${n} 个调用太大，没有传过来。`,
   } : {
+    sep: ' ',
     refresh: 'Refresh',
     machines: n => `Machines (${n})`,
     thisMachine: 'this machine',
@@ -165,6 +173,7 @@
     found: (n, more, grouped) => (more ? 'The first ' : '') +
       (grouped ? (n === 1 && !more ? '1 session' : `${n} sessions`) : (n === 1 && !more ? '1 match' : `${n} matches`)),
     noHits: 'Nothing found.',
+    noHitsShort: 'Nothing found. But the search was not complete, so that does not mean there is nothing.',
     searchFailed: msg => `Could not search: ${msg}`,
     hits: n => n === 1 ? '1 match' : `${n} matches`,
     notAll: 'Not everything found is listed. Narrow the search with a file, a project or a time.',
@@ -176,15 +185,20 @@
       copies: 'It did not answer, so only the sessions read on this machine before were searched.',
       none: 'It did not answer, and none of its sessions was read on this machine before.',
       noneSelf: 'The sessions of this machine could not be searched.',
+      unfinished: 'Its search did not complete, so matches from it may be missing.',
       partial: 'Some of what it holds could not be searched in full, so matches may be missing.',
     },
+    through: t => `Messages older than ${t} were not searched.`,
     note: note => `It says: ${note}`,
     // A session read around a place that was found.
     earlier: 'Earlier messages',
     match: 'match',
     matchMoved: 'match, may have moved',
     moved: 'This session has changed since the search, so the match may have moved.',
-    nearest: 'The message nearest to it is marked.',
+    nearest: 'Its message is gone; the one after it is marked.',
+    gone: 'The place is now past the end of the session; its last messages are shown.',
+    tooLarge: 'The messages before these are too large to be fetched with them.',
+    fromStart: 'Read from the start',
     kind: { meta: 'meta', compact: 'compaction' },
     thinking: 'Thinking',
     callFailed: 'failed',
@@ -244,6 +258,7 @@
   const scrolled = { list: 0, search: 0 }; // how far each view was scrolled
   let searchSeq = 0;   // the newest search; older answers are dropped
   let shown = null;    // {params, limit} of the search whose answer is on screen
+  let pending = null;  // {params, limit} of the newest search, until its answer comes
   let begun = false;   // whether a search was asked for from the form yet
   const found = new Map(); // the sessions of the search on screen, by node and key
 
@@ -290,7 +305,7 @@
     if (self.note) notes.push(T.notShared(self.note));
     if (list.length < 2) notes.push(T.noPeers);
     note.hidden = notes.length === 0;
-    note.textContent = notes.join(' ');
+    note.textContent = notes.join(T.sep);
 
     const rows = list.map(n => {
       const li = el('li');
@@ -460,7 +475,7 @@
     const again = shown !== null && params === shown.params;
     searching(false);
     if (!asks(params)) {
-      shown = null;
+      shown = pending = null;
       found.clear();
       $('search-note').textContent = T.needSomething;
       $('search-nodes').hidden = true;
@@ -468,6 +483,7 @@
       $('search-more').hidden = true;
       return;
     }
+    pending = { params, limit };
     searching(true);
     if (!again) {
       $('search-note').textContent = T.searching;
@@ -480,12 +496,14 @@
       r = await api('sessions/search', { ...params, limit });
     } catch (err) {
       if (seq !== searchSeq) return;
+      pending = null;
       searching(false);
       if (!again) shown = null; // what was on screen is gone
       $('search-note').textContent = T.searchFailed(err.message);
       return;
     }
     if (seq !== searchSeq) return; // another search was asked for meanwhile
+    pending = null;
     searching(false);
     shown = { params, limit };
     const grouped = Boolean(params.by_session);
@@ -493,7 +511,9 @@
     found.clear();
     showStates(r.nodes);
     $('hits').replaceChildren(...items.map(x => grouped ? group(x) : hit(x, params.q)));
-    $('search-note').textContent = items.length ? T.found(items.length, r.more, grouped) : T.noHits;
+    // No match from a search that was not complete is no proof of none.
+    const short = r.nodes.some(n => n.partial || n.searched === 'none');
+    $('search-note').textContent = items.length ? T.found(items.length, r.more, grouped) : short ? T.noHitsShort : T.noHits;
     $('search-more').hidden = !r.more;
     $('search-more-note').textContent = T.notAll;
     $('search-wider').hidden = limit >= WIDE;
@@ -530,9 +550,14 @@
       li.append(el('span', 'name', n.name || n.id), el('span', 'state', state.join(' · ')));
       const why = [];
       if (n.searched === 'copies') why.push(T.why.copies);
-      if (n.searched === 'none') why.push(nodes.some(x => x.id === n.id && x.self) ? T.why.noneSelf : T.why.none);
-      if (n.partial) why.push(T.why.partial);
-      if (why.length) li.append(el('div', 'why', why.join(' ')));
+      if (n.searched === 'none') {
+        why.push(nodes.some(x => x.id === n.id && x.self) ? T.why.noneSelf : n.partial ? T.why.unfinished : T.why.none);
+      } else if (n.partial) {
+        why.push(T.why.partial);
+      }
+      const cut = through(n.note);
+      if (cut) why.push(T.through(when(cut)));
+      if (why.length) li.append(el('div', 'why', why.join(T.sep)));
       if (n.note) li.append(el('div', 'why note', T.note(n.note)));
       rows.push(li);
     }
@@ -540,11 +565,19 @@
     $('search-nodes').hidden = rows.length === 0;
   }
 
+  // through is how far back a node searched before its budget ran out,
+  // when its note says so: the time of the oldest message it reached. The
+  // note itself is in English, and shown as it came.
+  const through = note => {
+    const m = /\bsearched newest messages through (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)/.exec(note || '');
+    return m && !Number.isNaN(Date.parse(m[1])) ? m[1] : '';
+  };
+
   // place starts the row of a place found: a message, a call in it, or the
   // first match in a session. Choosing it opens the session there.
   function place(s, at, call) {
     found.set(`${s.node_id}/${s.key}`, { node_id: s.node_id, node: s.node, key: s.key, title: s.title,
-      agent: agentOf(s.key), project: s.project, updated_at: s.updated_at });
+      agent: s.agent || agentOf(s.key), project: s.project, project_path: s.project_path, updated_at: s.updated_at });
     const li = el('li');
     li.dataset.node = s.node_id;
     li.dataset.key = s.key;
@@ -559,7 +592,7 @@
   function facts(s, time, count) {
     const m = el('div', 'm');
     m.append(el('span', 'where', s.node || s.node_id));
-    m.append(el('span', 'grow', [agentOf(s.key), s.project].filter(Boolean).join(' · ')));
+    m.append(el('span', 'grow', [s.agent || agentOf(s.key), s.project].filter(Boolean).join(' · ')));
     if (count) m.append(el('span', 'count', count));
     m.append(el('span', 'when', when(time)));
     return m;
@@ -570,7 +603,7 @@
     if (h.call !== undefined) {
       const c = el('div', 'call');
       c.append(el('span', 'tool', h.tool || '?'));
-      for (const f of h.files || []) c.append(file(f, ''));
+      for (const f of h.files || []) c.append(file(f, h.project_path || ''));
       li.append(c);
     }
     li.append(snippet(h.snippet, terms));
@@ -771,10 +804,6 @@
       li.querySelector('details').open = true;
     }
   }
-  // heavy says whether an answer may have been cut short by its size
-  // rather than by the number of messages asked for.
-  const heavy = messages => JSON.stringify(messages).length > 300000;
-
   const reading = busy => {
     $('more-messages').disabled = busy;
     $('earlier').disabled = busy;
@@ -841,10 +870,13 @@
         // The place is the message with its id or, when the session has
         // changed and it is gone, the next one there is.
         const i = r.messages.findIndex(m => m.id >= a.id);
-        if (r.moved) notes.push(i < 0 ? T.moved : `${T.moved} ${T.nearest}`);
-        if (i >= 0) pin(shownHere[i], r.messages[i].id === a.id ? a.call : -1, Boolean(r.moved));
+        const same = i >= 0 && r.messages[i].id === a.id;
+        if (r.moved) notes.push([T.moved, i < 0 ? T.gone : same ? '' : T.nearest].filter(Boolean).join(T.sep));
+        if (i >= 0) pin(shownHere[i], same ? a.call : -1, Boolean(r.moved));
+        // Whether messages come before these, the node says: when they are
+        // large it sends fewer than were asked for.
         open.first = r.messages.length ? r.messages[0].id : 0;
-        open.earlier = open.first > 0 && ((i < 0 ? r.messages.length : i) >= BEFORE || heavy(r.messages));
+        open.earlier = Boolean(r.has_before) && open.first > 0;
         $('earlier').hidden = !open.earlier;
       }
       $('notes').replaceChildren(...notes.map(n => el('p', '', n)));
@@ -880,8 +912,21 @@
     const add = r.messages.filter(m => m.id < first);
     $('messages').prepend(...add.map(m => message(m, open.base)));
     if (add.length) open.first = add[0].id;
-    open.earlier = add.length > 0 && (add.length >= PAGE || heavy(r.messages));
+    open.earlier = Boolean(r.has_before) && add.length > 0;
     $('earlier').hidden = !open.earlier;
+    // There are earlier messages, but the one before the first shown and
+    // that one are too large for one answer, which always holds the
+    // message it is asked around. From the start, a page holds one.
+    if (r.has_before && !add.length) {
+      const p = el('p', 'stuck', T.tooLarge + ' ');
+      const start = el('button', '', T.fromStart);
+      start.type = 'button';
+      start.addEventListener('click', () => {
+        location.hash = `s=${encodeURIComponent(node)}/${encodeURIComponent(key)}`;
+      });
+      p.append(start);
+      $('notes').append(p);
+    }
   }
 
   // The address remembers which session is open, "#s=<node id>/<key>",
@@ -986,8 +1031,10 @@
   $('earlier').addEventListener('click', earlier);
   $('refresh').addEventListener('click', async () => {
     $('refresh').disabled = true;
-    // A search on screen is asked again too, as it was asked.
-    await Promise.all([refresh(true), mode === 'search' && shown ? search(shown.params, shown.limit) : null]);
+    // The search is asked again too, as it was asked: the one on its way
+    // if there is one, else the one on screen.
+    const again = mode === 'search' && (pending || shown);
+    await Promise.all([refresh(true), again ? search(again.params, again.limit) : null]);
     $('refresh').disabled = false;
   });
   $('list').addEventListener('click', e => {

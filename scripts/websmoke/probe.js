@@ -56,6 +56,24 @@
     } while (after);
     return seqs;
   };
+  // message is a message of a session as the node lists it: its id, and
+  // the revision of the session it was read at, which a place found has.
+  t.message = async (node, key, seq) => {
+    let after = 0;
+    do {
+      const r = await get(`/api/v1/sessions/messages?limit=50&node=${encodeURIComponent(node)}&key=${encodeURIComponent(key)}&after=${after}`);
+      const m = r.messages.find(m => m.seq === seq);
+      if (m) return { id: m.id, rev: r.rev };
+      after = r.next || 0;
+    } while (after);
+    return null;
+  };
+  // around asks the node itself for the messages around one, as the page
+  // does for a place found.
+  t.around = async (node, key, id, before, after) => {
+    const r = await get(`/api/v1/sessions/messages?node=${encodeURIComponent(node)}&key=${encodeURIComponent(key)}&around=${id}&before=${before}&after=${after}`);
+    return { seqs: r.messages.map(m => `#${m.seq}`), has_before: r.has_before };
+  };
 
   // What is on the page.
   t.rows = () => [...document.querySelectorAll('#list > li')].map(li => `${li.dataset.node}/${li.dataset.key}`);
@@ -107,7 +125,7 @@
     const r = await get(`/api/v1/sessions/search?${query}`);
     const places = r.sessions ? r.sessions.map(g => name(g.node_id, g.key, g.first))
       : r.hits.map(h => name(h.node_id, h.key, h.id, h.call));
-    return { places, more: r.more, hits: r.hits };
+    return { places, more: r.more, hits: r.hits, groups: r.sessions || [], nodes: r.nodes };
   };
   t.places = () => [...document.querySelectorAll('#hits > li')].map(li =>
     name(li.dataset.node, li.dataset.key, li.dataset.at, li.dataset.call));
@@ -133,6 +151,8 @@
   t.choose = place => [...document.querySelectorAll('#hits > li')].find(li =>
     name(li.dataset.node, li.dataset.key, li.dataset.at, li.dataset.call) === place).click();
   t.searched = () => !document.getElementById('s-go').disabled && document.getElementById('search-note').textContent !== '';
+  // note is what the page says above the places found.
+  t.note = () => document.getElementById('search-note').textContent;
   // anchor is the message marked as a place found: its number, the calls
   // marked in it and whether they are open.
   t.anchor = () => {
