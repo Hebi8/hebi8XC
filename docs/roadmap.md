@@ -49,6 +49,8 @@ Roughly in the order that seems most useful. Structured sessions Phase 1 and the
 
 ## Small things left open
 
+- Export generations restart at 0 after store loss, so a previously renumbered session can overwrite old generation-0 collector rows; Wake also omits Claude Code inputs queued while the agent is busy (six messages across four devices in a one-week lifelog comparison). See the design limits.
+
 - A new node refuses peers for the few seconds before its first roster fetch finishes; they log one line and recover on the next round.
 - Whether Windows needs the UDP 5353 firewall rule for mDNS has not been checked.
 - Copies of sessions are never removed from a node's cache.
