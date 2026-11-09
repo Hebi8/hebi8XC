@@ -18,9 +18,10 @@ import (
 // acknowledgement stream, not independent retention for multiple collectors.
 //
 // Since is a Unix millisecond watermark, established only by the first Export.
-// Existing sessions with UpdatedAt < Since get a baseline but no log items.
-// Later changes (including changes to those sessions) and later arrivals are
-// exported regardless of their timestamps. Nil on later calls inherits the
+// Existing sessions with UpdatedAt < Since get a baseline unless a message
+// has Time >= Since. Stamp-only or metadata-only baseline changes are not
+// exported; real message changes and later arrivals are included regardless
+// of the session timestamp. Nil on later calls inherits the
 // persisted watermark; later calls keep that first watermark. On the first
 // call in a new store, After and Ack are ignored, since they may name a lost
 // epoch. A supplied Epoch that differs also resets After and ignores Ack.
@@ -265,8 +266,14 @@ func (s *Store) prepareExportSession(ctx context.Context, source Source, c Chang
 		current = kept
 	}
 	if degraded {
-		c.ToolCalls, c.ToolErrors = previous.ToolCalls, previous.ToolErrors
+		if c.Structure == 0 {
+			c.ToolCalls, c.ToolErrors = previous.ToolCalls, previous.ToolErrors
+		}
 		c.Tokens, c.Files = previous.Tokens, previous.Files
+		c.Structure = previousLevel
+	}
+	if c.Deleted && scanned {
+		c.Session = previous
 		c.Structure = previousLevel
 	}
 	if renumbered {

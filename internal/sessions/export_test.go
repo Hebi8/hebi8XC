@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -759,8 +760,8 @@ func TestExportLimitsAndDeletedMetadata(t *testing.T) {
 	delete(f.src.entries, meta.Key)
 	f.refresh()
 	tombstone := f.page(sessions.ExportOptions{After: last.Next})
-	if len(tombstone.Items) != 1 || !tombstone.Items[0].Deleted || tombstone.Items[0].Session.Tokens != nil || len(tombstone.Items[0].Session.Files) != 0 {
-		t.Fatal("deleted metadata retained", tombstone)
+	if len(tombstone.Items) != 1 || !tombstone.Items[0].Deleted || tombstone.Items[0].Session.Tokens == nil || *tombstone.Items[0].Session.Tokens.Total != n || !reflect.DeepEqual(tombstone.Items[0].Session.Files, meta.Files) {
+		t.Fatal("deleted snapshot lost metadata", tombstone)
 	}
 }
 
@@ -1018,4 +1019,118 @@ func TestExportBatchBoundaries(t *testing.T) {
 		}
 		f.page(sessions.ExportOptions{})
 	})
+}
+
+func TestExportDeletionRetainsLatestSnapshot(t *testing.T) {
+	f := newExportFixture(t)
+	const key = "agent:one"
+	f.src.put(key, 100, exportMessage(1, 1, "message"))
+	first := f.page(sessions.ExportOptions{})
+	meta := f.src.entries[key]
+	calls, errs, input := int64(2), int64(1), int64(7)
+	meta.Title = "Latest title"
+	meta.Project = "parser"
+	meta.ProjectPath = "/home/alice/src/parser"
+	meta.App = "terminal"
+	meta.CreatedAt = 20
+	meta.UpdatedAt = 200
+	meta.ToolCalls = &calls
+	meta.ToolErrors = &errs
+	meta.Tokens = &sessions.Tokens{Input: &input}
+	meta.Files = []string{"/home/alice/src/parser/main.go"}
+	f.src.entries[key] = meta
+	f.refresh()
+	latest := f.page(sessions.ExportOptions{After: first.Next})
+	if len(latest.Items) != 1 {
+		t.Fatal(latest)
+	}
+	f.page(sessions.ExportOptions{After: latest.Next, Ack: &latest.Next})
+	delete(f.src.entries, key)
+	f.refresh()
+	deleted := f.page(sessions.ExportOptions{After: latest.Next})
+	if len(deleted.Items) != 1 || !deleted.Items[0].Deleted || deleted.Items[0].Rev <= latest.Items[0].Rev || !reflect.DeepEqual(deleted.Items[0].Session, latest.Items[0].Session) {
+		t.Fatal("deletion did not retain latest snapshot", deleted)
+	}
+	feed, err := f.svc.Store.Changes(exportContext, "desk", latest.Items[0].Rev, 1)
+	if err != nil || len(feed) != 1 || feed[0].Tokens != nil || len(feed[0].Files) != 0 {
+		t.Fatal("peer deletion contract changed", err)
+	}
+}
+
+func TestExportRollbackUsesFreshCallCounts(t *testing.T) {
+	f := newExportFixture(t)
+	d := waketest.New(t, t.TempDir())
+	const key = "codex:example"
+	d.Put(waketest.Session{Key: key, Agent: "codex"}, waketest.Message{Role: "assistant", Text: "first", Time: 10})
+	d.Structure(key, 1, sessions.Message{Usage: &sessions.Usage{Input: 7}, Calls: []sessions.Call{{Tool: "edit", Files: []sessions.File{{Path: "/home/alice/a.go", Op: "change"}}}}})
+	x := wake.Open(d.Path)
+	defer x.Close()
+	f.svc.Source = x
+	first := f.page(sessions.ExportOptions{})
+	d.Append(key, waketest.Message{Role: "assistant", Text: "second", Time: 20})
+	d.StructureV1(key, 2, sessions.Message{Calls: []sessions.Call{{Tool: "shell", Error: true}}})
+	f.refresh()
+	page := f.page(sessions.ExportOptions{After: first.Next})
+	if len(page.Items) != 2 {
+		t.Fatal(page)
+	}
+	meta := page.Items[0].Session
+	if meta.ToolCalls == nil || *meta.ToolCalls != 2 || meta.ToolErrors == nil || *meta.ToolErrors != 1 || meta.Tokens == nil || *meta.Tokens.Input != 7 || len(meta.Files) != 1 || f.number(`SELECT structured FROM export_scan WHERE key='codex:example'`) != 2 {
+		t.Fatal("rollback retained stale call counts", meta)
+	}
+}
+
+func TestExportACPTranscriptLossPreservesStructure(t *testing.T) {
+	for _, empty := range []bool{false, true} {
+		t.Run(fmt.Sprint("empty=", empty), func(t *testing.T) {
+			f := newExportFixture(t)
+			root := t.TempDir()
+			dir := filepath.Join(root, "conversations")
+			if err := os.Mkdir(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			d := acptest.New(t, dir, "example")
+			if empty {
+				d.Transcript()
+			} else {
+				d.CWD("/home/alice/src/parser")
+				d.Put(0, "user", "Fix the parser", "", "", 1000)
+				d.Put(1, "assistant", "Done", "", "model-x", 2000)
+				d.Transcript(
+					map[string]any{"step_index": 0, "type": "USER_INPUT"},
+					map[string]any{"step_index": 1, "type": "PLANNER_RESPONSE", "thinking": "Check the loop", "input_tokens": 7, "output_tokens": 5, "tool_calls": []any{map[string]any{"name": "write_to_file", "args": map[string]any{"TargetFile": `"/home/alice/src/parser/main.go"`}}}},
+					map[string]any{"step_index": 2, "type": "CODE_ACTION", "content": "written"},
+				)
+			}
+			f.svc.Source = antigravity.Open(dir)
+			first := f.page(sessions.ExportOptions{})
+			want := first.Items[0].Session
+			if want.ToolCalls == nil || (!empty && (want.Tokens == nil || len(want.Files) != 1 || len(first.Items) != 3)) {
+				t.Fatal("missing initial ACP structure", first)
+			}
+			path := filepath.Join(root, "brain", "example", ".system_generated", "logs", "transcript.jsonl")
+			if err := os.Rename(path, path+".away"); err != nil {
+				t.Fatal(err)
+			}
+			f.refresh()
+			lost := f.page(sessions.ExportOptions{After: first.Next})
+			if len(lost.Items) != 1 || lost.Items[0].Type != "session" || !reflect.DeepEqual(lost.Items[0].Session, want) {
+				t.Fatal("ACP downgrade overwrote snapshot", lost)
+			}
+			if err := os.Rename(path+".away", path); err != nil {
+				t.Fatal(err)
+			}
+			f.refresh()
+			recovered := f.page(sessions.ExportOptions{After: lost.Next})
+			// The revision notification remains; unchanged message snapshots do not
+			// reappear when the original transcript is readable again.
+			if len(recovered.Items) != 1 || recovered.Items[0].Type != "session" || !reflect.DeepEqual(recovered.Items[0].Session, want) {
+				t.Fatal("ACP recovery resent content", recovered)
+			}
+			f.refresh()
+			if len(f.page(sessions.ExportOptions{After: recovered.Next}).Items) != 0 {
+				t.Fatal("unchanged ACP recovery kept exporting")
+			}
+		})
+	}
 }
