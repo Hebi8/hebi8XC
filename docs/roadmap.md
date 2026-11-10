@@ -47,22 +47,23 @@ Every call returned without an error. Cold pure filters keep what they found: `f
 
 The earlier review confirmed the schema-2 rollback chain and the cross-version protocol. This round adds no protocol field and leaves every original protocol sample unchanged.
 
+Agent evaluation (2026-11-10), counts only. Nine questions about the user's own earlier work, eight answered somewhere in past sessions and one about something that had not happened, went at the same time to three fresh sessions: Claude Code with the skill, Codex with the skill, and Claude Code with only a memory service, which keeps saved memories and the message text of past sessions but not call outputs. No answer was wrong, and each session said it found nothing for the ninth. With the skill, Claude Code answered seven fully and one with a minor detail missing, in 68 queries and 13 minutes; Codex did the same in 54 queries and 8 minutes. Memory alone answered five fully and three with a detail missing, in 65 queries and 12 minutes. The one fact that only the skill sessions reached was a list in a call's output; most other answers were in the memory service's text as well, and its memories tied later corrections to the earlier decisions. Both skill sessions missed half of an error message that only a call had printed: search does not cover outputs, and they read only the summary after it. The ninth question took one skill session 26 queries. One session that a memory pointed to had already been removed by its agent's 30-day retention, while the memory service still held its text. No session used the material the questions were prepared from. The skill now says that outputs are not searched and how to read them, when to stop looking for something that may not be there, and that relayed summaries are second-hand.
+
 
 Not yet tried on a real machine: the firewall commands in the README's Windows section, removing a machine by deleting its key, and a machine that only has hand-trusted keys.
 
 ## What could come next
 
-Roughly in the order that seems most useful. Structured sessions Phase 1, the Go portions of Phases 2 and 3, the Phase 3 page and the agent skill are implemented; external integration, the agent evaluation and later phases remain. Items 1, 2 and 6 are designed together in [proposals/structured-sessions.md](proposals/structured-sessions.md), which also says how a personal data store, lifelog, would take its session events from h8c; the fork, per-device lifelog collection and eventual retention choices have been accepted. Retention remains Phase 4.
+Roughly in the order that seems most useful. Structured sessions Phases 1 to 3 are implemented, the page and the agent skill ([skill/h8c/SKILL.md](skill/h8c/SKILL.md)) included, and the skill has been tried with agents (above). Wake's structure format 2 runs on all five machines, and lifelog takes its session events from h8c on one of them so far. Items 1 and 5 are designed together in [proposals/structured-sessions.md](proposals/structured-sessions.md), which also says how a personal data store, lifelog, would take its session events from h8c; the fork, per-device lifelog collection and eventual retention choices have been accepted. Retention remains Phase 4.
 
-1. **Agent evaluation.** The Go core, the APIs, the page's search and calls and the agent skill ([skill/h8c/SKILL.md](skill/h8c/SKILL.md)) are implemented. Try the skill with agents on real questions and compare it with memory alone.
-2. **An MCP server for agents.** `h8c mcp`, read-only, with list, search and read over the whole net, so an agent on one machine can pick up what was done on another. What it returns comes from session text and must be treated as untrusted.
-3. **A client inside an agent app.** An app such as Lody could list sessions from the local node (`h8c sessions --json`, or the page's API) instead of importing them project by project. Continuing a session would still have to happen on the machine that holds it.
-4. **Reading from a phone or another device.** The page is for the browser on the same machine. Serving it to other devices needs its own answer to who may read.
-5. **Releases.** A version tag, built binaries, and `h8c service install` in place of the hand-written service files. Until there is a tag, builds are named by their commit.
-6. **More of a session.** The h8c Phase 2 readers and export are implemented. Wake adapter usage/error completion and the lifelog switch are separate work; what remains of Phase 3 is the agent evaluation, followed by MCP. Wake still omits meta, compaction and thinking-only messages; calls retain the fork's input/output cuts.
-7. **Sessions that Wake on the host does not see**, such as those inside WSL or containers.
-8. **Continuing a session on its machine**, and handing work from one machine to another. This means driving agents, not only reading what they wrote, and is a larger step.
-9. **More than one user.** Out of scope so far: every node in the roster is the same person and is trusted fully. Sharing between people needs per-peer permissions, which nothing here has.
+1. **An MCP server for agents.** `h8c mcp`, read-only, with list, search and read over the whole net, so an agent on one machine can pick up what was done on another. What it returns comes from session text and must be treated as untrusted.
+2. **A client inside an agent app.** An app such as Lody could list sessions from the local node (`h8c sessions --json`, or the page's API) instead of importing them project by project. Continuing a session would still have to happen on the machine that holds it.
+3. **Reading from a phone or another device.** The page is for the browser on the same machine. Serving it to other devices needs its own answer to who may read.
+4. **Releases.** A version tag, built binaries, and `h8c service install` in place of the hand-written service files. Until there is a tag, builds are named by their commit.
+5. **More of a session.** The h8c Phase 2 readers and export and Wake's format 2 are in place; lifelog moves to them one machine at a time. Searching call outputs, bounded like inputs, would reach errors and lists that only a call printed. Wake still omits meta, compaction and thinking-only messages; calls retain the fork's input/output cuts.
+6. **Sessions that Wake on the host does not see**, such as those inside WSL or containers.
+7. **Continuing a session on its machine**, and handing work from one machine to another. This means driving agents, not only reading what they wrote, and is a larger step.
+8. **More than one user.** Out of scope so far: every node in the roster is the same person and is trusted fully. Sharing between people needs per-peer permissions, which nothing here has.
 
 ## Small things left open
 
@@ -73,6 +74,10 @@ Roughly in the order that seems most useful. Structured sessions Phase 1, the Go
 - Deferred ACP two-step “no calls” declarations: only two of four observed cases could support that declaration, and the rule would be empirical. Wait for documented ACP format semantics.
 
 - Export generations restart at 0 after store loss, so a previously renumbered session can overwrite old generation-0 collector rows; Wake also omits Claude Code inputs queued while the agent is busy (six messages across four devices in a one-week lifelog comparison). See the design limits.
+
+- Search covers message text, thinking and call inputs but not call outputs; what only a call printed is read with `h8c show` around a related message. A hit carries no role, and sessions that restate others, such as delegation results and digests, rank with the originals; a search cannot leave a session out. Terms are substrings, so a short number also matches inside longer ones.
+- `h8c sessions` has no `--until`, and its `updated_at` is RFC 3339 where grouped search gives Unix milliseconds.
+- A home directory copied to a new machine makes both machines list the same keys: their hits come in pairs, and a key given without a node is ambiguous until one copy is gone.
 
 - A new node refuses peers for the few seconds before its first roster fetch finishes; they log one line and recover on the next round.
 - Whether Windows needs the UDP 5353 firewall rule for mDNS has not been checked.

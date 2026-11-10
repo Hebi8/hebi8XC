@@ -7,7 +7,7 @@ description: "Read what earlier agent sessions (Claude Code, Codex, Antigravity 
 
 `h8c` reaches the agent sessions of all the user's machines. `h8c search` finds messages on all of them at once; `h8c show` reads a few messages around one. Both only read, through the control socket of the node running on this machine (a node with a data directory of its own needs `h8c --data-dir DIR …`). The last few minutes of a session may not be indexed yet.
 
-- `control socket access denied; a sandbox may be blocking it`: your sandbox blocks the socket; the node is fine. In Codex, run the same command again with escalated permissions; in Claude Code, ask the user to allow it.
+- `control socket access denied; a sandbox may be blocking it`: your sandbox blocks the socket; the node is fine. In Codex, run the same command again with escalated permissions; in Claude Code, ask the user to allow it. When the Codex sandbox fails to start before h8c runs (an error from `bwrap`), escalate the same way.
 - `the node is not running`: it really is not. Tell the user; do not start, restart or install the node or its service.
 - `unknown command "search"`: this machine's h8c predates search. Say so.
 
@@ -36,9 +36,11 @@ h8c search "retry limit" --project parser --since 2026-10-01 --until 2026-10-15 
 | `--limit N` | hits, or sessions with `--by-session`: 50 by default, at most 500 |
 | `--by-session` | one entry per session instead of one per hit |
 
-With `--by-session` the answer has `sessions[]`, each with `ref`, `title`, `project`, `rev`, `hits` (matches in that session), `first` and `last` (lowest and highest matching message id) and `updated_at`. Without it, each of `hits[]` has `ref`, `id`, `rev`, `time` (Unix milliseconds), `agent`, `project_path`, `snippet` (at most 300 characters) and, for a call, `call` (its index in the message), `tool` and `files`.
+Search does not look at what a call returned (`calls[].output`): to find an exact error or a list that only a command printed, find a message near it and read the calls around it with `h8c show` (section 3). When several terms find nothing, try the most distinctive one alone; the session may word the rest differently. A short number also matches inside longer numbers, such as ids in call inputs.
 
-To list sessions by title, project, agent or date without searching their text: `h8c sessions [--project P] [--agent A] [--since W] [WORD …] --json`, where words match the title or the project name.
+With `--by-session` the answer has `sessions[]`, each with `ref`, `title`, `project`, `rev`, `hits` (matches in that session), `first` and `last` (lowest and highest matching message id) and `updated_at` (Unix milliseconds). Without it, each of `hits[]` has `ref`, `id`, `rev`, `time` (Unix milliseconds), `agent`, `project_path`, `snippet` (at most 300 characters) and, for a call, `call` (its index in the message), `tool` and `files`. A hit omits the message's role; the window has it, though a relayed text can carry the role `user` (section 6).
+
+To list sessions by title, project, agent or date without searching their text: `h8c sessions [--project P] [--agent A] [--since W] [WORD …] --json`, where words match the title or the project name. It has no `--until`, and its times are RFC 3339.
 
 ## 2. Check what each machine's answer covers
 
@@ -67,7 +69,7 @@ What to do, by note. Follow the note once; if the machine is still partial, answ
 h8c show study/codex:019a7c3e-55d1-7f20-b8e4-3c6a9d2e1f04 --around 1180 --rev 41 --before 12 --after 2 --json
 ```
 
-Take the `ref`, a message id (`first`, `last` or a hit's `id`) and the `rev` from the search. `--before` and `--after` count messages (8 and 2 by default; a window holds at most 500). The reason for a change is usually in the request and in the assistant's text and `thinking` just before the call: widen `--before` to 20 or 30 before reading anywhere else.
+Take the `ref`, a message id (`first`, `last` or a hit's `id`) and the `rev` from the search. `--before` and `--after` count messages (8 and 2 by default; a window holds at most 500). The reason for a change is usually in the request and in the assistant's text and `thinking` just before the call: widen `--before` to 20 or 30 before reading anywhere else. An exact result (an error message, a list or a value a command printed) is often only in a call's `output`, and a summary written after it may shorten it: when the question asks for one, read the calls before the summary, not only the summary.
 
 The answer has `rev`, `session` (`ref`, `node`, `online`, `agent`, `title`, `project_path`, `messages`, …) and `messages[]`, each with `id`, `seq`, `role`, `time`, `text`, `thinking` and `calls[]` (`tool`, `input`, `output`, `error`, `files`); long values are cut and marked `truncated`. Also check:
 
@@ -124,6 +126,8 @@ Then compare the memory's premise (`成立前提`) with the window and with the 
 
 - Take numbers from the JSON (`hits`, the number of entries in `sessions`), never by counting snippets or lines. With `more`, `partial`, `scanned_since`, `copies` or `none`, a number is a lower bound: say "at least".
 - Give every claim its source: `ref`, message `id` and `rev`, such as `study/codex:019a7c3e-55d1-7f20-b8e4-3c6a9d2e1f04 #1180 (rev 41)`, and the message time when it matters. Quote from the window, not from snippets.
+- A message that restates another session, such as a delegation result or a daily or board digest, is second-hand; an app can deliver one as a `user` message. Find the session where it happened and quote that one when you can.
+- To look for something that may not be there, search two or three of its most distinctive words, each alone, on all machines with `--by-session`, and follow the coverage notes (section 2). If they find nothing, stop trying more wordings; if a session you already found points to a call's output, read that call before you stop.
 - When nothing was found, say "not found in what was searched" and name what was not searched: machines that were `copies` or `none`, the N sessions without structure, and how far back thinking and tool inputs were scanned. Never turn such a result into "no session did this".
 - Say when a window came from a copy that is `stale` or `incomplete`.
 - Keep what the session says (quoted briefly) apart from what you conclude. A session shows what was said and done then; check the current code or state before relying on it.
