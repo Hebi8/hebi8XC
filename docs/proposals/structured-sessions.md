@@ -31,19 +31,19 @@ Where this document describes real data or code, it was checked on 2026-11-02 on
 
 ### Coverage by agent
 
-What Wake's model holds today (from the source at v0.10.2), what the real index on one machine holds (sessions with the value / sessions), and what the sources have that the adapters do not keep. *has*: in the model and the index. *add*: the source has it, the adapter does not keep it, a small change in that adapter. *lacks*: the source does not have it. *verify*: not checked, no session of that agent on the machine checked.
+What Wake's model holds today (from the source at v0.10.2), what the real index on one machine holds (sessions with the value / sessions), and what the sources have that the adapters do not keep. *has*: in the model and the index. *add*: the source has it, the adapter does not keep it, a small change in that adapter. *lacks*: the source does not have it. *verify*: not checked, no session of that agent on the machine checked. *(phase 2)*: filled by the fork's phase 2 (structure format 2), from the source and, for counts, a machine's index after it, or from a fixture written after the source where no session of that agent is on the machine.
 
 | Agent | Tool calls | Error flag | Thinking | Model | Session tokens | Usage per call | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| claude-code | has | has | has | has, 903/911 | has, 902/911; adds every assistant record, so a call repeated over its block records may count several times (to measure) | add: usage per API message | records of one API message merged into one message; copied history folded into one meta row |
-| codex | has | add: exit code is in the output, the adapter sets false | has | has, 190/190 | has, 190/190 | add: a usage record per model response | messages come from the model records |
-| antigravity (ACP transcript) | has, ids `step-<n>-<i>` | has: status `ERROR` or an error step; results matched to calls by position | has | has, from the user-input metadata | add: per-step tokens in the transcript; cards have none (0/14) | add: input, output, cache read per step | text in the transcript cut at about 4 KiB per step; full text only in the database; `antigravity-acp` not among the app directories; `.meta` (working directory) not read |
-| dsh | has | has | has | has, 6/51 | has, 6/51 (36 of 51 sessions have no message) | add: usage per assistant message | |
-| hermes | has | verify: the adapter sets none; whether the source has a status is not checked | has | has, 597/597 | has, 586/597 | verify | |
-| grok | has | has: status `failed` | has | has, 544/544 | lacks, 0/544 (verify) | lacks (verify) | |
-| kimi | has | has: `isError` | has | has (verify) | verify | verify | no session on the machine checked |
-| opencode | has | has: status `error` | has | has (verify) | verify | verify | no session on the machine checked |
-| pi | has | has | has | has (verify) | has: usage per assistant message | add | no session on the machine checked |
+| claude-code | has | has | has | has, 903/911 | has, 902/911; counted once per API message, from its last record (phase 2) | has: per API message, its last record (phase 2) | records of one API message merged into one message; copied history folded into one meta row |
+| codex | has | has: the process status from structured fields or the result header; a code-mode call takes its outer script's status (phase 2) | has | has, 190/190 | has, 190/190 | has: per model response (phase 2) | messages come from the model records |
+| antigravity (ACP transcript) | has, ids `step-<n>-<i>` | has: status `ERROR` or an error step; results matched to calls by position | has | has, from the user-input metadata | has: the steps' tokens in the transcript; cards have none (0/14) (phase 2) | has: input, output, cache read per planner step; checkpoints have none (phase 2) | text in the transcript cut at about 4 KiB per step; full text only in the database; `antigravity-acp` among the app directories and `.meta` (working directory) read since phase 2 |
+| dsh | has | has | has | has, 6/51 | has, 6/51 (36 of 51 sessions have no message) | has: per assistant message (phase 2) | |
+| hermes | has | has: the result's `error`, a status `failed` or `error`, `success` false, a non-zero `exit_code`, or a batch whose results all failed; guardrail refusals and landed writes are not failures, as in the source's own classification (phase 2) | has | has, 597/597 | has, 586/597 | lacks: the messages' `token_count` is empty (0 of 4723 assistant messages); the session row has totals only | |
+| grok | has | has: status `failed` | has | has, 544/544 | has, 222/634: the sum of the prompts' completions; a session without a completion that carries counters has none (phase 2) | per prompt, not per call: a completion covers one prompt, which may span several model calls and subagents, and goes on the prompt's reply (phase 2) | |
+| kimi | has | has: `isError` | has | has (verify) | has: the sum of the steps' usage records (phase 2, fixture) | has: per step (phase 2, fixture) | no session on the machine checked |
+| opencode | has | has: status `error` | has | has (verify) | has: the session row's input, output and reasoning totals (from the adapter's source) | verify: not kept; whether the source has it per message is not checked | no session on the machine checked |
+| pi | has | has | has | has (verify) | has: usage per assistant message | has: input, output, cache read and cache write per assistant message (phase 2, fixture) | no session on the machine checked |
 | gemini, kiro | lacks in the adapter (verify the source) | lacks | lacks | has (verify) | lacks (verify) | lacks (verify) | no session on the machine checked |
 
 The rules that follow from the table, the same for every agent:
@@ -221,7 +221,7 @@ Each phase is shippable alone, with every test, `go vet`, `gofmt`, the three bui
 
 ### Phase 2: usage, errors, files, the export, and lifelog switched
 
-- In the fork: steps 2 and 3 of section 2, for every adapter the table marks *add*, and `antigravity-acp` with the `.meta` file in the Antigravity adapter. Before them, a read-only script over the real files on one machine reports, as counts only, how many Claude Code calls repeat identical usage across their block records and how many do not. In h8c: `export_log`, the export with session and message items, `ack` and `--since`; `tokens` and `files` on the session. Outside: the collector's new source mode and the switch of section 6, device by device.
+- In the fork: steps 2 and 3 of section 2, for every adapter the table marked *add* (now marked *(phase 2)*), and `antigravity-acp` with the `.meta` file in the Antigravity adapter. Before them, a read-only script over the real files on one machine reports, as counts only, how many Claude Code calls repeat identical usage across their block records and how many do not. In h8c: `export_log`, the export with session and message items, `ack` and `--since`; `tokens` and `files` on the session. Outside: the collector's new source mode and the switch of section 6, device by device.
 - Accepted when: the fixture with a call repeated over three block records yields one usage and session totals equal to the fixture's sums; on every switched device, at a cursor the collector has acknowledged, the hub holds under `h8c` a session event for every session of every agent updated there since `W`, with as many message rows per session as `h8c show --json` has at that session's revision (counts per device, agent and session); a sample of messages per device and agent, read from the hub, equals `h8c show --json` on the device, text uncut, calls and usage included; the counts of the old `claude_code` and `codex` rows are what they were before the switch, on every device; the seam sessions are listed in the collector's log and readable from `h8c`; the old parser is removed from the collector; one agent that was never collected before appears at the hub by configuration alone.
 
 ### Phase 3: search across machines
@@ -243,10 +243,9 @@ Not a decision any more: whether the new data fits lifelog's old rows (it need n
 
 ## 9. Open points
 
-- The table's *verify* cells: hermes's error flag, grok's tokens, and everything about kimi, opencode, pi, gemini and kiro, which have no session on the machine checked. They are filled in when an adapter is touched, from its source.
+- The table's remaining *verify* cells: the models of kimi, opencode and pi, opencode's usage per message, and everything about gemini and kiro, none of which has a session on the machine checked; kimi's and pi's usage is proven on fixtures only. They are filled in when an adapter is touched, from its source.
 - ACP: whether the transcript's `step_index` numbers the same steps as the database; Wake's adapter matches results to calls by position, and h8c's reader should do better if the transcript allows it. Sessions from before the transcripts (2 of substance on one machine) and the four two-step ones have text only.
 - A Codex thread continued in a second file: Wake keeps one file per key. None exists on the machine checked.
-- Claude Code's usage: whether a call's usage is repeated on each of its block records is measured in phase 2; the adapter counts once per call id either way, and Wake's session total may change by the same fix.
 - `seq` renumbers in the cases of section 2; the archive then holds a session twice under two generations, and anchors move, which `rev` reports. A record id would avoid both and is not worth its own field until a renumbering is seen in practice.
 - Messages that Wake does not index (meta, compaction, thinking without text) have no row, so no side row either, and a continued session's folded history is not visible to h8c beyond what the index shows. If that matters, the fork can index them as empty rows, which is a change to Wake's own search results and is left out of the first phases.
 - Sessions whose files the agents have already cleaned up are not in Wake's index and get no structure; their text lives in h8c copies and, for the two old sources, in lifelog's frozen rows.
