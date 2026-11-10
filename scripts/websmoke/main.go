@@ -12,13 +12,16 @@
 // narrow window shows a session that cannot be read, and why, in the
 // reader's language. Of the search it checks that the places found are
 // the node's answer, that the page says how each machine was searched and
-// what is missing, when there is more, when nothing was found and when the
-// search failed, that a refresh asks again for the search on its way, and
-// that a place found opens its session there, marked and in view, with the
-// messages before and after it each shown once, earlier ones offered as
-// long as the node says there are some. Under a message it checks the
-// calls: their tools, failures and files shown, input and output folded
-// until a click.
+// what is missing, from what the node says of it and not from its note,
+// when there is more, when nothing was found, when the node would refuse
+// a search, when it refuses one in its own words and when it cannot be
+// reached, that a refresh asks again for
+// the search on its way, and that a place found opens its session there,
+// marked and in view, with the messages before and after it each shown
+// once, earlier ones offered as long as the node says there are some.
+// Under a message it checks the calls: their tools, failures and files
+// shown, input and output folded until a click; and that a record of text
+// only says so.
 //
 // With -shots DIR it also writes pictures of the page there, narrow and
 // wide, in English and in Chinese, to look at after a change of the
@@ -169,6 +172,20 @@ type found struct {
 	Groups []struct {
 		Hits int `json:"hits"`
 	} `json:"groups"`
+	Nodes []struct {
+		ID   string `json:"id"`
+		Note string `json:"note"`
+	} `json:"nodes"`
+}
+
+// note is what the node said of the machine id in its answer.
+func (f found) note(id string) string {
+	for _, n := range f.Nodes {
+		if n.ID == id {
+			return n.Note
+		}
+	}
+	return ""
 }
 
 // window is what the node itself answers when asked around a message.
@@ -203,18 +220,70 @@ func none(attic string) string {
 		nodes: v.nodes.map(n => n.id === ` + q(attic) + ` ? { id: n.id, name: n.name, searched: 'none', note: 'peer search unavailable' } : n) } : v`
 }
 
-// stopped is an answer to a search in which laptop ran out of its budget
-// after it had searched its messages back to a day ago, as the node says
-// it. It returns that time as the page writes it.
-func stopped(laptop string) string {
-	return `(() => {
-		const through = new Date(Math.floor((Date.now() - 864e5) / 6e4) * 6e4);
-		const iso = through.toISOString().replace('.000Z', 'Z');
-		__t.edit = (url, v) => url.includes('/sessions/search') ? { ...v, nodes: v.nodes.map(n => n.id === ` + q(laptop) + ` ? { ...n, partial: true,
-			note: 'searched newest messages through ' + iso + '; search budget reached; results are incomplete; narrow the project, file or time range' } : n) } : v;
+// reversed gives the search a range of dates from today to yesterday, the
+// wrong way round, and returns how many requests the page made of it.
+const reversed = `(() => {
+	const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+	const now = new Date(), yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+	const before = __t.log.length;
+	const s = document.getElementById('s-when');
+	s.value = 'range';
+	s.dispatchEvent(new Event('change', { bubbles: true }));
+	document.getElementById('s-from').value = ymd(now);
+	const to = document.getElementById('s-to');
+	to.value = ymd(yesterday);
+	to.dispatchEvent(new Event('change', { bubbles: true }));
+	return __t.log.length - before; })()`
+
+// aDayAgo is a time a day before now, to the minute, as JavaScript in the
+// page: dayAgo, a number of milliseconds, and its forms in a node's note,
+// utc and iso. shown is how the page writes it.
+const aDayAgo = `const dayAgo = Math.floor((Date.now() - 864e5) / 6e4) * 6e4;
+	const iso = new Date(dayAgo).toISOString().replace('.000Z', 'Z');
+	const utc = iso.replace('T', ' ').replace('Z', ' UTC');
+	const shown = (() => {
 		const form = { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
-		if (through.getFullYear() !== new Date().getFullYear()) form.year = 'numeric';
-		return through.toLocaleString(document.documentElement.lang, form);
+		if (new Date(dayAgo).getFullYear() !== new Date().getFullYear()) form.year = 'numeric';
+		return new Date(dayAgo).toLocaleString(document.documentElement.lang, form);
+	})();`
+
+// covered is an answer to a search in which laptop searched its message
+// text in full, and its thinking and full tool inputs only back to a day
+// ago, as a node says it, in scanned_since and in its note. It returns
+// that time as the page writes it.
+func covered(laptop string) string {
+	return `(() => {
+		` + aDayAgo + `
+		__t.edit = (url, v) => url.includes('/sessions/search') ? { ...v, nodes: v.nodes.map(n => n.id === ` + q(laptop) + ` ? { ...n, scanned_since: dayAgo,
+			note: 'message text searched completely; thinking and full tool inputs searched since ' + utc + '; add --since ' + iso + ' to narrow this scan' } : n) } : v;
+		return shown;
+	})()`
+}
+
+// The notes of desk and laptop in an answer edited by spent: each ran out
+// of a budget of its own.
+const (
+	deskNote   = "messages examined through 2026-11-09T08:00:00Z; search time budget exhausted; results are incomplete; add --project or a narrower --since/--until range"
+	laptopNote = "search candidate limit reached; results are incomplete; add --project or a narrower --since/--until range"
+	atticNote  = "searched held copies; search time budget exhausted; results are incomplete"
+)
+
+// spent is an answer to a search in which desk and laptop each ran out of
+// a budget, with a note of its own, and laptop searched its thinking and
+// full tool inputs only back to a day ago. Attic's note speaks of
+// incomplete results, but attic does not say partial. It returns the time
+// of laptop's cutoff as the page writes it.
+func spent(desk, laptop, attic string) string {
+	return `(() => {
+		` + aDayAgo + `
+		const edits = {
+			` + q(desk) + `: { partial: true, note: ` + q(deskNote) + ` },
+			` + q(laptop) + `: { partial: true, scanned_since: dayAgo,
+				note: ` + q(laptopNote) + ` + '; thinking and full tool inputs searched since ' + utc + '; add --since ' + iso + ' to narrow this scan' },
+			` + q(attic) + `: { note: ` + q(atticNote) + ` },
+		};
+		__t.edit = (url, v) => url.includes('/sessions/search') ? { ...v, nodes: v.nodes.map(n => ({ ...n, ...edits[n.id] })) } : v;
+		return shown;
 	})()`
 }
 
@@ -546,16 +615,45 @@ func run() int {
 		len(js[[]string](k, `__t.places()`)) == len(term.Places)-strings.Count(strings.Join(term.Places, " "), attic+"/"), js[[]string](k, `__t.places()`))
 	k.check("a search not done everywhere that finds something says what it found", js[string](k, `__t.note()`) == fmt.Sprintf("%d matches", len(js[[]string](k, `__t.places()`))), js[string](k, `__t.note()`))
 
-	fmt.Println("# a machine that stopped early")
-	cut := js[string](k, stopped(laptop))
+	fmt.Println("# a machine whose thinking was searched only so far back")
+	side := js[string](k, covered(laptop))
 	k.check("the search is asked", js[int](k, `__t.submit()`) == 1)
 	searched()
 	k.c.eval(`__t.edit = null`, nil)
-	k.check("the page says what came from it is incomplete", js[map[string]string](k, `__t.states()`)[laptop] == "live+partial" &&
-		strings.Contains(row(laptop), "matches may be missing"), js[map[string]string](k, `__t.states()`))
-	k.check("and how far back it searched, as a time of the reader's", cut != "" && strings.Contains(row(laptop), "Messages older than "+cut+" were not searched."), cut, row(laptop))
-	k.check("and the node's note as it came", strings.Contains(row(laptop), "It says: searched newest messages through ") &&
-		strings.Contains(row(laptop), "search budget reached"), row(laptop))
+	k.check("it searched live and in full, as it says, and shares the line of the others", js[map[string]string](k, `__t.states()`)[laptop] == "live" &&
+		js[int](k, `document.querySelectorAll('#search-nodes li.short [data-node="`+laptop+`"], #search-nodes li.short[data-node="`+laptop+`"]').length`) == 0,
+		js[map[string]string](k, `__t.states()`))
+	sides := js[[]string](k, `[...document.querySelectorAll('#search-nodes li.live .side')].map(e => e.textContent)`)
+	k.check("a quiet line under it says how far back its thinking and full tool inputs were searched, in the reader's time",
+		side != "" && reflect.DeepEqual(sides, []string{d.Names[1] + ": Message text searched in full; thinking and full tool inputs only back to " + side + "."}), sides, side)
+	k.check("its note, which says the same for the command line, is not shown", !strings.Contains(row(laptop), "--since"), row(laptop))
+	// Its message text was searched in full: nothing found there is so.
+	js[string](k, covered(laptop))
+	js[int](k, `__t.type('s-q', 'zyzzyva')`)
+	k.check("a search that finds nothing is asked", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.c.eval(`__t.edit = null`, nil)
+	k.check("nothing found there is said plainly, with the line under it", js[string](k, `__t.note()`) == "Nothing found." &&
+		js[int](k, `document.querySelectorAll('#search-nodes li.live .side').length`) == 1, js[string](k, `__t.note()`))
+	js[int](k, `__t.type('s-q', `+q(d.Term)+`)`)
+
+	fmt.Println("# machines that each ran out of a budget")
+	cut := js[string](k, spent(desk, laptop, attic))
+	k.check("the search is asked", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.c.eval(`__t.edit = null`, nil)
+	states = js[map[string]string](k, `__t.states()`)
+	k.check("each says it is incomplete", states[desk] == "live+partial" && states[laptop] == "live+partial" &&
+		strings.Contains(row(desk), "searched live · incomplete") && strings.Contains(row(laptop), "searched live · incomplete"), states)
+	k.check("each with its own note beside it, as it came", strings.HasSuffix(row(desk), "It says: "+deskNote) &&
+		strings.Contains(row(laptop), "It says: "+laptopNote+"; thinking and full tool inputs searched since ") &&
+		!strings.Contains(row(desk), laptopNote) && !strings.Contains(row(laptop), deskNote), row(desk), row(laptop))
+	k.check("laptop's thinking was searched only so far back, and nothing is said of its message text", cut != "" &&
+		strings.Contains(row(laptop), "Thinking and full tool inputs only back to "+cut+".") && !strings.Contains(row(laptop), "Message text searched in full"), row(laptop))
+	k.check("nothing is read from a note: desk's says when it examined messages up to, and the page gives no time of its own",
+		!strings.Contains(row(desk), "only back to") && !strings.Contains(row(desk), "older than"), row(desk))
+	k.check("a note alone changes nothing: attic's speaks of incomplete results, and attic is not said to be incomplete", states[attic] == "copies" &&
+		js[string](k, `document.querySelector('#search-nodes li[data-node="`+attic+`"] .state').textContent`) == "copies only", states)
 
 	fmt.Println("# a file, of which attic's copies cannot say")
 	js[int](k, `__t.type('s-q', '')`)
@@ -564,8 +662,9 @@ func run() int {
 	searched()
 	byFile := js[found](k, `__t.found('file=`+url.QueryEscape(d.File)+`')`)
 	k.check("the places found are the node's answer", len(byFile.Places) > 0 && reflect.DeepEqual(js[[]string](k, `__t.places()`), byFile.Places), js[[]string](k, `__t.places()`), byFile.Places)
-	k.check("attic's copies have no calls: that is said to be incomplete", js[map[string]string](k, `__t.states()`)[attic] == "copies+partial" &&
-		strings.Contains(row(attic), "matches may be missing"), row(attic))
+	k.check("attic's copies have no calls: that is said to be incomplete, with the node's note beside it as it came",
+		js[map[string]string](k, `__t.states()`)[attic] == "copies+partial" && strings.Contains(row(attic), "copies only · incomplete") &&
+			byFile.note(attic) != "" && strings.HasSuffix(row(attic), "It says: "+byFile.note(attic)), row(attic))
 	// The change to the file is made in the second message of Code: what
 	// the node sends around it reaches the first.
 	near := -1
@@ -601,27 +700,39 @@ func run() int {
 		js[map[string]string](k, `__t.states()`)[attic] == "copies+partial", js[string](k, `__t.note()`), js[map[string]string](k, `__t.states()`))
 	js[int](k, `__t.type('s-file', '')`)
 
-	fmt.Println("# a search that fails")
+	fmt.Println("# a search the node would refuse, and a node that cannot be reached")
 	js[int](k, `__t.type('s-q', `+q(d.Term)+`)`)
-	k.check("dates the wrong way round are asked for", js[int](k, `(() => {
-		const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-		const now = new Date(), yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-		const s = document.getElementById('s-when');
-		s.value = 'range';
-		s.dispatchEvent(new Event('change', { bubbles: true }));
-		document.getElementById('s-from').value = ymd(now);
-		const before = __t.log.length;
-		const to = document.getElementById('s-to');
-		to.value = ymd(yesterday);
-		to.dispatchEvent(new Event('change', { bubbles: true }));
-		return __t.log.length - before; })()`) == 1)
-	searched()
-	k.check("the page says the search failed, and what the node said", js[string](k, `__t.note()`) == "Could not search: invalid search time range" &&
-		len(js[[]string](k, `__t.places()`)) == 0 && !js[bool](k, `__t.shown('search-nodes')`) && !js[bool](k, `__t.shown('search-more')`), js[string](k, `__t.note()`))
-	k.check("it can be asked again at once", !js[bool](k, `document.getElementById('s-go').disabled`))
+	// nothing is the page with no place found and no machine listed.
+	nothing := func() bool {
+		return len(js[[]string](k, `__t.places()`)) == 0 && !js[bool](k, `__t.shown('search-nodes')`) && !js[bool](k, `__t.shown('search-more')`)
+	}
+	k.check("dates the wrong way round ask nothing, and the page says why", js[int](k, reversed)+js[int](k, `__t.submit()`) == 0 &&
+		js[string](k, `__t.note()`) == "The start date cannot be after the end date." && nothing(), js[string](k, `__t.note()`))
 	k.c.eval(`(() => { const s = document.getElementById('s-when'); s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); })()`, nil)
 	searched()
-	k.check("and then it finds what it found before", reflect.DeepEqual(js[[]string](k, `__t.places()`), term.Places))
+	k.check("33 words ask nothing, and the page says why", js[int](k, `__t.type('s-q', Array.from({ length: 33 }, (_, i) => 'w' + i).join(' '))`)+js[int](k, `__t.submit()`) == 0 &&
+		js[string](k, `__t.note()`) == "At most 32 words can be searched for; leave some out." && nothing(), js[string](k, `__t.note()`))
+	k.check("words longer than the node takes ask nothing, and the page says why", js[int](k, `__t.type('s-q', 'x'.repeat(4097))`)+js[int](k, `__t.submit()`) == 0 &&
+		js[string](k, `__t.note()`) == "The words to find are too long: 4096 bytes at most." && nothing(), js[string](k, `__t.note()`))
+	js[int](k, `__t.type('s-q', `+q(d.Term)+`)`)
+	k.c.eval(`__t.fail = true`, nil)
+	k.check("when the node cannot be reached, the search is tried", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.c.eval(`__t.fail = false`, nil)
+	k.check("and the page says so in its own words", js[string](k, `__t.note()`) == "Could not search: The h8c node on this machine cannot be reached." && nothing(),
+		js[string](k, `__t.note()`))
+	// A machine that has left the node's list since the page listed it: a
+	// refusal the page does not foresee is said as the node said it.
+	k.c.eval(`(() => { const s = document.getElementById('s-node'); s.append(new Option('gone', 'gone')); s.value = 'gone'; })()`, nil)
+	k.check("a machine the node no longer knows is asked for", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.check("the page says what the node said, as it came", js[string](k, `__t.note()`) == `Could not search: no node "gone"` && nothing(),
+		js[string](k, `__t.note()`))
+	k.c.eval(`(() => { const s = document.getElementById('s-node'); s.value = ''; s.querySelector('option[value="gone"]').remove(); })()`, nil)
+	k.check("it can be asked again at once", !js[bool](k, `document.getElementById('s-go').disabled`))
+	k.check("and then it is asked", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.check("and finds what it found before", reflect.DeepEqual(js[[]string](k, `__t.places()`), term.Places))
 
 	fmt.Println("# a place found opens its session there")
 	js[int](k, `__t.type('s-q', `+q(`"`+d.Anchor+`"`)+`)`)
@@ -769,6 +880,21 @@ func run() int {
 		js[[]string](k, calls(4)+`.map(li => li.querySelector('.tool').textContent)`), []string{"shell"}) &&
 		js[int](k, calls(0)+`.length`)+js[int](k, calls(2)+`.length`)+js[int](k, calls(3)+`.length`) == 0)
 
+	fmt.Println("# a record of text only")
+	// level is the structure the node says a reading of a session has.
+	level := func(node, key string) string {
+		return js[string](k, `fetch('/api/v1/sessions/messages?node=`+url.QueryEscape(node)+`&key=`+url.QueryEscape(key)+`').then(r => r.json()).then(r => String(r.structure_level))`)
+	}
+	k.c.eval(`__t.open(`+q(attic)+`, `+q(d.Kept)+`)`, nil)
+	k.await(`__t.seqs().length === 2`)
+	k.check("of attic's copy, which has its text only, the page says that it has no calls in it", level(attic, d.Kept) == "0" &&
+		strings.Contains(js[string](k, `document.getElementById('notes').textContent`), "This record has the text only, without its tool calls."),
+		level(attic, d.Kept), js[string](k, `document.getElementById('notes').textContent`))
+	k.c.eval(`__t.open(`+q(desk)+`, `+q(d.Code)+`)`, nil)
+	k.await(`__t.seqs().length === 5`)
+	k.check("of a session with its calls it says nothing of the kind", level(desk, d.Code) == "2" &&
+		!strings.Contains(js[string](k, `document.getElementById('notes').textContent`), "text only"), level(desk, d.Code))
+
 	fmt.Println("# the search form, wide and narrow")
 	open(home)
 	js[int](k, `__t.press('mode-search')`)
@@ -838,6 +964,10 @@ func run() int {
 		js[string](k, `document.getElementById('title').textContent`))
 	k.check("what the list said of it is under the title", strings.Contains(js[string](k, `document.getElementById('meta').textContent`), "opencode"))
 	k.check("the reason is in Chinese and names the machine", strings.Contains(why, n.Data.Names[2]+" 现在离线") && !strings.Contains(why, "offline"), why)
+	k.c.eval(`__t.open(`+q(attic)+`, `+q(n.Data.Kept)+`)`, nil)
+	k.await(`__t.seqs().length === 2`)
+	k.check("a record of text only is said to be one, in Chinese", strings.Contains(js[string](k, `document.getElementById('notes').textContent`), "这份记录只有正文，没有工具调用信息。"),
+		js[string](k, `document.getElementById('notes').textContent`))
 	type build struct{ Version, Shown, Whole string }
 	builds := js[[]build](k, `__t.sessions('').then(() => fetch('/api/v1/sessions?limit=1')).then(r => r.json()).then(page =>
 		page.nodes.map((n, i) => { const s = document.querySelectorAll('#machines li')[i].querySelectorAll('.facts span'); const b = s[s.length - 2];
@@ -881,7 +1011,25 @@ func run() int {
 	k.check("a file found nowhere is asked for", js[int](k, `__t.submit()`) == 1)
 	searched()
 	k.check("the page says in Chinese that finding nothing in part is no proof", js[string](k, `__t.note()`) == "没有找到。但这次搜索不完整，不能说明没有。" &&
-		strings.Contains(row(attic), "结果不完整") && strings.Contains(row(attic), "可能漏掉了结果"), js[string](k, `__t.note()`), row(attic))
+		strings.Contains(row(attic), "结果不完整"), js[string](k, `__t.note()`), row(attic))
+	js[int](k, `__t.type('s-file', '')`)
+	js[int](k, `__t.type('s-q', `+q(d.Term)+`)`)
+	k.check("dates the wrong way round are refused in Chinese", js[int](k, reversed)+js[int](k, `__t.submit()`) == 0 &&
+		js[string](k, `__t.note()`) == "开始日期不能晚于结束日期。", js[string](k, `__t.note()`))
+	k.c.eval(`(() => { const s = document.getElementById('s-when'); s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); })()`, nil)
+	searched()
+	side = js[string](k, covered(laptop))
+	k.check("a search is asked", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.c.eval(`__t.edit = null`, nil)
+	sides = js[[]string](k, `[...document.querySelectorAll('#search-nodes li.live .side')].map(e => e.textContent)`)
+	k.check("how far back thinking and full tool inputs were searched is said in Chinese", side != "" &&
+		reflect.DeepEqual(sides, []string{d.Names[1] + "：正文已全部搜索；思考过程和完整工具输入只搜到 " + side + "。"}), sides)
+	k.c.eval(`__t.fail = true`, nil)
+	k.check("a search is tried", js[int](k, `__t.submit()`) == 1)
+	searched()
+	k.c.eval(`__t.fail = false`, nil)
+	k.check("a node that cannot be reached is said so in Chinese", js[string](k, `__t.note()`) == "搜索失败：连不上本机的 h8c 节点。", js[string](k, `__t.note()`))
 
 	if *shots != "" {
 		fmt.Println("# pictures")
@@ -907,9 +1055,10 @@ func run() int {
 // cannot be read come the search, grouped and not, a place found opened in
 // its session, calls opened under a message, a machine that was not
 // searched, the note that more was found than is listed, nothing found in
-// full and in part, a search that failed, a machine that stopped early,
-// and a place near the start of its session, as found and after its
-// session changed.
+// full and in part, a node that cannot be reached, machines that each ran
+// out of a budget, a place near the start of its session, as found and
+// after its session changed, dates the wrong way round, a machine that
+// searched its thinking only so far back, and a copy of text only.
 func pictures(ctx context.Context, k *checker, dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -1006,28 +1155,17 @@ func pictures(ctx context.Context, k *checker, dir string) error {
 			k.await(`__t.searched() && __t.places().length === 0 && document.querySelector('#search-nodes [data-partial]')`)
 			c.eval(`document.getElementById('modes').scrollIntoView()`, nil)
 			shot(name+"14-nothing-found-in-part", false)
-			// A search that fails: the dates are the wrong way round.
-			c.eval(`(() => {
-				const ymd = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-				const now = new Date(), yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
-				const s = document.getElementById('s-when');
-				s.value = 'range';
-				s.dispatchEvent(new Event('change', { bubbles: true }));
-				document.getElementById('s-from').value = ymd(now);
-				const to = document.getElementById('s-to');
-				to.value = ymd(yesterday);
-				to.dispatchEvent(new Event('change', { bubbles: true }));
-			})()`, nil)
-			k.await(`__t.searched() && __t.note().includes('invalid search time range')`)
-			c.eval(`document.getElementById('modes').scrollIntoView()`, nil)
+			// A search that fails: the node cannot be reached.
+			c.eval(`__t.fail = true; __t.type('s-file', ''); __t.type('s-q', `+q(n.Data.Term)+`); __t.submit()`, nil)
+			k.await(`__t.searched() && __t.places().length === 0`)
+			c.eval(`__t.fail = false; document.getElementById('modes').scrollIntoView()`, nil)
 			shot(name+"15-failed", false)
-			// A machine that stopped early, a day back.
-			c.eval(`(() => { const s = document.getElementById('s-when'); s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); })()`, nil)
-			k.await(`__t.searched()`)
-			c.eval(stopped(laptop)+`; __t.type('s-file', ''); __t.type('s-q', `+q(n.Data.Term)+`); __t.submit()`, nil)
+			// Desk and laptop each ran out of a budget, each with its note;
+			// laptop's thinking was searched only so far back.
+			c.eval(spent(desk, laptop, attic)+`; __t.submit()`, nil)
 			k.await(`__t.searched() && __t.places().length > 0`)
 			c.eval(`__t.edit = null; document.getElementById('modes').scrollIntoView()`, nil)
-			shot(name+"16-stopped-early", false)
+			shot(name+"16-incomplete", false)
 			// A place near the start of its session, with nothing before
 			// it; then the same place after its session changed.
 			code := q(desk + "/" + n.Data.Code + "#")
@@ -1041,6 +1179,24 @@ func pictures(ctx context.Context, k *checker, dir string) error {
 			k.await(`__t.anchor() && document.querySelector('#notes p') && !document.getElementById('earlier').disabled`)
 			c.eval(`document.getElementById('reader-body').scrollIntoView()`, nil)
 			shot(name+"18-moved", false)
+			// Dates the wrong way round: the page says so and asks nothing.
+			c.eval(`__t.type('s-file', ''); __t.type('s-q', `+q(n.Data.Term)+`)`, nil)
+			c.eval(reversed, nil)
+			k.await(`__t.searched() && __t.places().length === 0`)
+			c.eval(`document.getElementById('modes').scrollIntoView()`, nil)
+			shot(name+"19-dates-reversed", false)
+			// Laptop searched its thinking only so far back, all else in full.
+			c.eval(`(() => { const s = document.getElementById('s-when'); s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true })); })()`, nil)
+			k.await(`__t.searched() && __t.places().length > 0`)
+			c.eval(covered(laptop)+`; __t.submit()`, nil)
+			k.await(`__t.searched() && document.querySelector('#search-nodes .side')`)
+			c.eval(`__t.edit = null; document.getElementById('modes').scrollIntoView()`, nil)
+			shot(name+"20-side-coverage", false)
+			// Attic's kept copy, which has its text only.
+			c.eval(`__t.open(`+q(attic)+`, `+q(n.Data.Kept)+`)`, nil)
+			k.await(`__t.seqs().length === 2 && document.querySelector('#notes p')`)
+			c.eval(`document.getElementById('reader-body').scrollIntoView()`, nil)
+			shot(name+"21-text-only", false)
 		}
 	}
 	fmt.Println("written to " + dir)

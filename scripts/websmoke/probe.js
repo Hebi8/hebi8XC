@@ -3,14 +3,16 @@
 // and can hold the answers back to hand them over in a chosen order. The
 // requests themselves leave at once and reach the real node. With edit set
 // it changes an answer before the page reads it, for a state of a machine
-// that the demo does not reach.
+// that the demo does not reach. With fail set a request fails as it does
+// when the node has stopped.
 (() => {
   const real = window.fetch.bind(window);
-  const t = window.__t = { log: [], held: [], hold: false, edit: null };
+  const t = window.__t = { log: [], held: [], hold: false, edit: null, fail: false };
 
   window.fetch = (input, init) => {
     const entry = { url: String(input) };
     t.log.push(entry.url);
+    if (t.fail) return Promise.reject(new TypeError('Failed to fetch'));
     let read;
     entry.read = new Promise(done => { read = done; });
     const answer = real(input, init).then(res => {

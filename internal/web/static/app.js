@@ -42,10 +42,13 @@
     fromCopy: t => `这是 ${t} 保存在本机的副本。`,
     stale: '这个会话在副本保存之后有更新。',
     incomplete: '副本没有到会话末尾。',
+    textOnly: '这份记录只有正文，没有工具调用信息。',
     cut: '（这条消息更长，这里只有开头）',
     sideThread: id => `支线 ${id}`,
     showAll: n => `显示全部（${n} 个字符）`,
     failed: msg => `读取失败：${msg}`,
+    unreachable: '连不上本机的 h8c 节点。',
+    status: n => `节点返回了 ${n}`,
     cannot: {
       'not-found': () => '这个会话已经不存在了。',
       'offline-not-read': name => `${name} 现在离线，本机也没有读过这个会话，所以这里没有它的副本。`,
@@ -69,6 +72,9 @@
     go: '搜索',
     intro: '在所有机器的消息、思考过程和调用里找词。',
     needSomething: '输入要找的词，或者选一个文件、agent、项目、机器或时间。',
+    badRange: '开始日期不能晚于结束日期。',
+    tooManyTerms: '最多可以找 32 个词，请去掉一些。',
+    tooLong: '要找的词太长了，最多 4096 字节。',
     searching: '搜索中…',
     found: (n, more, grouped) => (more ? '前 ' : '') + (grouped ? `${n} 个会话` : `${n} 处命中`),
     noHits: '没有找到。',
@@ -87,7 +93,9 @@
       unfinished: '对它的搜索没有完成，可能漏掉了它那里的结果。',
       partial: '有一部分内容没能完整搜索，可能漏掉了结果。',
     },
-    through: t => `早于 ${t} 的消息没有搜索。`,
+    side: t => `正文已全部搜索；思考过程和完整工具输入只搜到 ${t}。`,
+    sideOnly: t => `思考过程和完整工具输入只搜到 ${t}。`,
+    of: (name, text) => `${name}：${text}`,
     note: note => `说明：${note}`,
     // A session read around a place that was found.
     earlier: '更早的消息',
@@ -142,10 +150,13 @@
     fromCopy: t => `This is the copy kept on this machine, made ${t}.`,
     stale: 'The session has changed since this copy was made.',
     incomplete: 'The copy does not reach the end of the session.',
+    textOnly: 'This record has the text only, without its tool calls.',
     cut: '(this message is longer; this is its beginning)',
     sideThread: id => `side thread ${id}`,
     showAll: n => `Show all (${n} characters)`,
     failed: msg => `Could not read: ${msg}`,
+    unreachable: 'The h8c node on this machine cannot be reached.',
+    status: n => `the node answered ${n}`,
     cannot: {
       'not-found': () => 'This session no longer exists.',
       'offline-not-read': name => `${name} is offline and this session has not been read on this machine before, so there is no copy of it here.`,
@@ -169,6 +180,9 @@
     go: 'Search',
     intro: 'Finds words in the messages, thinking and calls of every machine.',
     needSomething: 'Type words to find, or choose a file, an agent, a project, a machine or a time.',
+    badRange: 'The start date cannot be after the end date.',
+    tooManyTerms: 'At most 32 words can be searched for; leave some out.',
+    tooLong: 'The words to find are too long: 4096 bytes at most.',
     searching: 'Searching…',
     found: (n, more, grouped) => (more ? 'The first ' : '') +
       (grouped ? (n === 1 && !more ? '1 session' : `${n} sessions`) : (n === 1 && !more ? '1 match' : `${n} matches`)),
@@ -188,7 +202,9 @@
       unfinished: 'Its search did not complete, so matches from it may be missing.',
       partial: 'Some of what it holds could not be searched in full, so matches may be missing.',
     },
-    through: t => `Messages older than ${t} were not searched.`,
+    side: t => `Message text searched in full; thinking and full tool inputs only back to ${t}.`,
+    sideOnly: t => `Thinking and full tool inputs only back to ${t}.`,
+    of: (name, text) => `${name}: ${text}`,
     note: note => `It says: ${note}`,
     // A session read around a place that was found.
     earlier: 'Earlier messages',
@@ -269,13 +285,18 @@
         if (v !== '' && v !== undefined && v !== null) url.searchParams.append(name, v);
       }
     }
-    const res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+    let res;
+    try {
+      res = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+    } catch {
+      throw new Error(T.unreachable); // the node has stopped, or never answered
+    }
     if (res.status === 401) {
       location.reload(); // the cookie is gone; the server says how to get a new one
       throw new Error('unauthorized');
     }
     if (!res.ok) {
-      const err = new Error((await res.text()).trim() || res.statusText);
+      const err = new Error((await res.text()).trim() || T.status(res.status));
       err.code = res.headers.get('H8c-Error') || ''; // the reason as a word, if it has one
       throw err;
     }
@@ -452,8 +473,9 @@
     if (SPAN[span]) {
       p.since = Date.now() - SPAN[span];
     } else if (span === 'range') {
-      if ($('s-from').value) p.since = day($('s-from').value, 0);
-      if ($('s-to').value) p.until = day($('s-to').value, 1) - 1;
+      // The node takes no time before 1970, and there is nothing then.
+      if ($('s-from').value) p.since = Math.max(0, day($('s-from').value, 0));
+      if ($('s-to').value) p.until = Math.max(1, day($('s-to').value, 1) - 1);
     }
     return p;
   }
@@ -461,6 +483,16 @@
   // would list every message there is.
   const asks = p => Boolean(p.q.length || p.file || p.node || p.agent || p.project || p.tool || p.kind ||
     p.error || p.since || p.until);
+  // wrong says, in the reader's words, why the node would refuse to search
+  // for p, before it is asked: it would say so in its own, in English.
+  const bytes = new TextEncoder();
+  const wrong = p => {
+    if (!asks(p)) return T.needSomething;
+    if (p.since !== '' && p.until !== '' && p.since > p.until) return T.badRange;
+    if (p.q.length > 32) return T.tooManyTerms;
+    if (p.q.reduce((n, t) => n + bytes.encode(t).length, 0) > 4096) return T.tooLong;
+    return '';
+  };
 
   const searching = busy => {
     $('s-go').disabled = busy;
@@ -474,10 +506,11 @@
     const seq = ++searchSeq;
     const again = shown !== null && params === shown.params;
     searching(false);
-    if (!asks(params)) {
+    const problem = wrong(params);
+    if (problem) {
       shown = pending = null;
       found.clear();
-      $('search-note').textContent = T.needSomething;
+      $('search-note').textContent = problem;
       $('search-nodes').hidden = true;
       $('hits').replaceChildren();
       $('search-more').hidden = true;
@@ -522,12 +555,15 @@
   }
 
   // showStates says how each machine was searched: live, in the copies
-  // kept here, or not at all, and whether what it gave is complete. The
-  // machines that answered in full share one line; each other one has a
-  // line of its own that says what is missing.
+  // kept here, or not at all, and whether what it gave is complete. What it
+  // says comes from searched, partial and scanned_since alone; a node's note
+  // is shown as it came. The machines searched live and in full share one
+  // line, with a line under it for each one whose thinking and full tool
+  // inputs were searched only back to a time. Each other machine has a line
+  // of its own that says what is missing, with its note.
   function showStates(list) {
     const rows = [];
-    const whole = list.filter(n => n.searched === 'live' && !n.partial && !n.note);
+    const whole = list.filter(n => n.searched === 'live' && !n.partial);
     if (whole.length) {
       const li = el('li', 'live');
       for (const n of whole) {
@@ -537,6 +573,12 @@
         li.append(name);
       }
       li.append(el('span', 'state', T.live));
+      for (const n of whole) {
+        // The note of such a machine says what scanned_since says, for
+        // the command line.
+        const said = n.scanned_since ? T.side(when(n.scanned_since)) : n.note ? T.note(n.note) : '';
+        if (said) li.append(el('div', 'side', T.of(n.name || n.id, said)));
+      }
       rows.push(li);
     }
     for (const n of list) {
@@ -552,26 +594,17 @@
       if (n.searched === 'copies') why.push(T.why.copies);
       if (n.searched === 'none') {
         why.push(nodes.some(x => x.id === n.id && x.self) ? T.why.noneSelf : n.partial ? T.why.unfinished : T.why.none);
-      } else if (n.partial) {
-        why.push(T.why.partial);
+      } else if (n.partial && !n.note) {
+        why.push(T.why.partial); // the node's note says why, when it has one
       }
-      const cut = through(n.note);
-      if (cut) why.push(T.through(when(cut)));
       if (why.length) li.append(el('div', 'why', why.join(T.sep)));
+      if (n.scanned_since) li.append(el('div', 'side', (n.partial ? T.sideOnly : T.side)(when(n.scanned_since))));
       if (n.note) li.append(el('div', 'why note', T.note(n.note)));
       rows.push(li);
     }
     $('search-nodes').replaceChildren(...rows);
     $('search-nodes').hidden = rows.length === 0;
   }
-
-  // through is how far back a node searched before its budget ran out,
-  // when its note says so: the time of the oldest message it reached. The
-  // note itself is in English, and shown as it came.
-  const through = note => {
-    const m = /\bsearched newest messages through (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)/.exec(note || '');
-    return m && !Number.isNaN(Date.parse(m[1])) ? m[1] : '';
-  };
 
   // place starts the row of a place found: a message, a call in it, or the
   // first match in a session. Choosing it opens the session there.
@@ -865,6 +898,8 @@
       else if (r.from === 'cache' && r.cached_at) notes.push(T.fromCopy(when(r.cached_at)));
       if (r.stale) notes.push(T.stale);
       if (r.incomplete) notes.push(T.incomplete);
+      // Without calls in the record, a message without calls says nothing.
+      if (r.structure_level === 0) notes.push(T.textOnly);
       const a = open.anchor;
       if (a) {
         // The place is the message with its id or, when the session has

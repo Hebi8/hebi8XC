@@ -153,6 +153,8 @@ summary { cursor: pointer; color: var(--dim); }
 #search-nodes .state { margin-left: 0.5rem; color: var(--dim); }
 #search-nodes .short .state { color: var(--warn); }
 #search-nodes .why { color: var(--dim); }
+/* How far back thinking and full tool inputs were searched: a quiet line. */
+#search-nodes .side { color: var(--dim); font-size: 0.95em; }
 
 #list, #hits { list-style: none; margin: 0; padding: 0; }
 #list li, #hits li {
