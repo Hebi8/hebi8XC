@@ -32,21 +32,22 @@ A read-only ACP adapter check listed 218 of 219 local database files: 107 with m
 
 Phase 1 checks on one machine: 107 ACP transcripts, 2,314 steps, all matching database step indices, types and creation times to the transcript's second precision. A fresh temporary fork index held 5,480 sessions across six agents and 135,860 calls. `h8c show --json` returned calls for one real session per agent and the longest full message intact (474,847 characters, 554,120 UTF-8 bytes). Two loopback nodes, this build and `85465b9`, listed and read each other both ways; a copy made by the old build refreshed after the reader was upgraded. Phase 1 was deployed to four machines on 2026-11-03 and the fifth on 2026-11-10. A later counts-only transcript check covered 109 files and 2,436 steps: 708 planner steps had input tokens, none had output tokens without input tokens, and five non-planner steps with tokens were checkpoints. The other non-message types were six checkpoints and seven system messages, not omitted tool-result types. Checkpoint usage is not exposed by the Phase 1 user/planner message reader. A fresh stock Wake 0.9.2 temporary index (2,316 sessions) was also readable as text, with the structure fallback logged once. No installed node or index was changed.
 
-Phase 3 third-round measurements (2026-11-10), counts/timings only. devNuc used SQLite backups of Wake and the store. The Wake backup was already structure format 2 (5,774 sessions); no rebuild or online write was needed. Queries used **LocalSearch/Combined**, including all 5,895 published keys and 296 native ACP keys, with limit 50. The allow-list is one JSON parameter; no ACP exclusions are added. EXPLAIN regression coverage includes format-2 scope, hundreds of ACP keys and a 10,001-row group limit. The side range is evaluated once, capped at 20,000 messages.
+Phase 3 final-round measurements (2026-11-10), counts/timings only. SQLite backups were read without modifying the online index or service. The Wake backup held 5,786 local sessions and 91,539 messages; a full read-only timestamp check found **zero messages in zero sessions** later than sessions.updated_at. Pure filters therefore use that verified session upper bound. Queries used LocalSearch/Combined with 5,908 published keys, 299 ACP keys, limit 50 and a four-second budget. Before each cold query, backup files were synced and evicted with POSIX_FADV_DONTNEED; the same query then ran hot in the same process.
 
-| Query | ms | Returned hits | Wake hits in returned result | partial | scanned_since (Unix ms) |
-| --- | ---: | ---: | ---: | --- | --- |
-| error | 3780 | 50 | 50 | no | 1793736073749 |
-| test, tool Bash | 4938 | 50 | 50 | yes | 1792475254263 |
-| two-character CJK | 453 | 50 | 50 | no | 1793736073749 |
-| error, by session | 1183 | 726 in 50 groups | 717 | no | 1793736073749 |
-| file suffix | 595 | 1 | 1 | yes | absent |
+| Query | Cache | ms | Returned hits | partial | scanned_since | Note categories |
+| --- | --- | ---: | --- | --- | ---: | --- |
+| tool Bash | cold | 396 | 50 | yes | absent | missing structure |
+| tool Bash | hot | 383 | 50 | yes | absent | missing structure |
+| file store.go | cold | 4001 | 1 | yes | absent | time budget, missing files |
+| file store.go | hot | 3299 | 1 | yes | absent | missing files |
+| error, by session | cold | 4004 | 770 in 50 groups | no | 1793971939295 | side coverage |
+| error, by session | hot | 915 | 776 in 50 groups | no | 1793779738129 | side coverage |
+| error, tool Bash | cold | 4004 | 50 | yes | 1794276425866 | missing structure, side coverage |
+| error, tool Bash | hot | 3177 | 50 | yes | 1792589251800 | missing structure, side coverage |
 
-Both partial rows were caused by four ACP sessions missing relevant structure; Wake completed them without partial. Side coverage alone no longer makes the other rows partial. Repeated-run timings varied with load/cache state (for example error also completed in 494 ms); these are the last full-matrix measurements, not only direct Wake timings. A real-data peer-route call returned 50 Wake hits in 762 ms; a virtual-clock test verifies retention at the four-second peer deadline.
+All eight calls returned without an error. The cold pure-filter calls retained matches; a side-only timeout after indexed body completion did not make the grouped query partial. Structural notes include affected-session counts and newest timestamps. Deterministic tests cancel reads in a later session batch and during side scanning, skip one unreadable ACP session while retaining another, reject raw-error disclosure, remove contradictory completeness wording, exercise BUSY with an injected short wait and BEGIN EXCLUSIVE, and assign a fixed file mtime to an empty ACP fixture. All temporary databases and probes were removed after measurement. No export was run.
 
-On mini, SQLite backup copied a 113,233,920-byte store; the largest copied node held 15,972 messages. A darwin/arm64 probe ran searches concurrently with calibrated exclusive write transactions, using repeated metadata updates rather than sleeps. For the same approximately 1.8-second write contention, f59d8bb failed 10/10 queries with BUSY (1015–1026 ms, zero hits); the final implementation failed 0/10 (1842–2235 ms, 500 total hits, no partial or raw errors). Writer durations were 1786–1855 ms for the baseline and 1749–1808 ms for the final run. A deliberately longer 5560-ms writer produced a 5081-ms partial answer with the human retry note and no raw error. This is a controlled contention comparison, not an estimate of production failure probability.
-
-No running service, online index or export was changed. Temporary databases, probes and the baseline archive were deleted on both machines. New message-page structure declarations remain additive to protocol 1, with old content writers invalidating the declaration. The previously reviewed rollback chain remains schema-2 compatible. Tests cover missing/lowered declarations, old-writer invalidation and refresh, counted partial reasons excluding users, ACP historical windows, clipped around context, node coverage propagation, the 4-second peer budget, Windows errno 10061/10013 and the parameter-count/query-plan regressions.
+The earlier review confirmed the schema-2 rollback chain and the cross-version protocol. This round adds no protocol field and leaves every original protocol sample unchanged.
 
 
 Not yet tried on a real machine: the firewall commands in the README's Windows section, removing a machine by deleting its key, and a machine that only has hand-trusted keys.
@@ -66,6 +67,9 @@ Roughly in the order that seems most useful. Structured sessions Phase 1 and the
 9. **More than one user.** Out of scope so far: every node in the roster is the same person and is trusted fully. Sharing between people needs per-peer permissions, which nothing here has.
 
 ## Small things left open
+
+- Deferred S8: a read transaction can slow writers. Measured contention is acceptable for now; WAL or shorter read transactions can be evaluated later.
+- Deferred ACP two-step “no calls” declarations: only two of four observed cases could support that declaration, and the rule would be empirical. Wait for documented ACP format semantics.
 
 - Export generations restart at 0 after store loss, so a previously renumbered session can overwrite old generation-0 collector rows; Wake also omits Claude Code inputs queued while the agent is busy (six messages across four devices in a one-week lifelog comparison). See the design limits.
 

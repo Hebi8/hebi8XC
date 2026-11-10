@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -102,8 +103,9 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 		if err != nil {
 			var code interface{ Code() int }
 			if errors.As(err, &code) && (code.Code()&255) == 5 {
+				held = true
 				out.Partial = true
-				out.Note = JoinNote(out.Note, "copy search waited for a writer for 5 seconds; results are incomplete; retry after the copy finishes")
+				out.Note = JoinNote(out.Note, "copy search waited for a writer; results are incomplete; retry after the copy finishes")
 				err = nil
 			}
 		}
@@ -111,7 +113,7 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 	}()
 	// A dedicated read connection avoids monopolizing the store's write/feed
 	// connection. One read snapshot covers both coverage checks and results.
-	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: filepath.ToSlash(s.path), RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()
+	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: filepath.ToSlash(s.path), RawQuery: "mode=ro&_pragma=busy_timeout(" + strconv.FormatInt(s.searchBusyTimeout.Milliseconds(), 10) + ")"}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return out, false, err
@@ -159,38 +161,46 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 	from := ` FROM messages m JOIN content c ON c.node=m.node AND c.key=m.key AND c.gen=m.gen JOIN sessions s ON s.node=m.node AND s.key=m.key LEFT JOIN copy_structure cs ON cs.node=c.node AND cs.key=c.key AND cs.gen=c.gen AND cs.rev=c.rev `
 	// An incomplete copy can hide later assistant rows even if its retained
 	// prefix contains only users or lies before the message time window.
-	affectedSQL := `SELECT s.key FROM content c JOIN sessions s ON s.node=c.node AND s.key=c.key WHERE ` + strings.Join(scopeWhere, " AND ") + ` AND c.complete=0`
+	affectedSQL := `SELECT s.key,s.updated_at newest,1 incomplete FROM content c JOIN sessions s ON s.node=c.node AND s.key=c.key WHERE ` + strings.Join(scopeWhere, " AND ") + ` AND c.complete=0`
 	affectedArgs := append([]any{}, scopeArgs...)
-	missing := []string{"c.complete=0"}
-	if q.NeedsStructure() {
-		structural := []string{"m.kind=''"}
-		if q.FileFilter() {
-			structural = append(structural, "coalesce(cs.level,0)<2")
-		}
-		if q.CallFilter() {
-			structural = append(structural, "m.calls_dropped>0")
-		}
-		condition := "(" + strings.Join(structural, " OR ") + ")"
-		if q.CallFilter() {
-			condition = "(m.role<>'user' AND " + condition + ")"
-		}
-		missing = append(missing, condition)
-	}
-	affectedSQL += " UNION SELECT s.key" + from + " WHERE " + strings.Join(where, " AND ") + " AND (" + strings.Join(missing, " OR ") + ")"
+	affectedSQL += " UNION SELECT s.key,s.updated_at,1" + from + " WHERE " + strings.Join(where, " AND ") + " AND c.complete=0"
 	affectedArgs = append(affectedArgs, args...)
-	var affected int
-	err = tx.QueryRowContext(ctx, "SELECT count(*) FROM ("+affectedSQL+")", affectedArgs...).Scan(&affected)
+	if q.NeedsStructure() {
+		missing := []string{"m.kind=''"}
+		if q.FileFilter() {
+			missing = append(missing, "coalesce(cs.level,0)<2")
+		}
+		if q.CallFilter() {
+			missing = append(missing, "m.calls_dropped>0")
+		}
+		relevant := ""
+		if q.CallFilter() {
+			relevant = " AND m.role<>'user'"
+		}
+		affectedSQL += " UNION SELECT s.key,s.updated_at,0" + from + " WHERE " + strings.Join(where, " AND ") + relevant + " AND (" + strings.Join(missing, " OR ") + ")"
+		affectedArgs = append(affectedArgs, args...)
+	}
+	coverage, err := tx.QueryContext(ctx, "SELECT incomplete,count(*),max(newest) FROM ("+affectedSQL+") GROUP BY incomplete", affectedArgs...)
 	if err != nil {
 		return out, held, err
 	}
-	reason := "incomplete copies"
-	if q.NeedsStructure() {
-		reason = "message structure or complete copies unavailable"
+	for coverage.Next() {
+		var incomplete bool
+		var count int
+		var newest int64
+		if err = coverage.Scan(&incomplete, &count, &newest); err != nil {
+			break
+		}
+		out.Missing(count, newest, MissingReason(q, incomplete), true)
 	}
-	if q.FileFilter() {
-		reason = "file records or complete copies unavailable"
+	re := coverage.Err()
+	coverage.Close()
+	if err != nil {
+		return out, held, err
 	}
-	out.Missing(affected, reason)
+	if re != nil {
+		return out, held, re
+	}
 	if q.NeedsStructure() {
 		where = append(where, "m.kind<>''")
 	}

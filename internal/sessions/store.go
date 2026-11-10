@@ -31,9 +31,10 @@ import (
 // Sessions of this machine and of others share one table, told apart by the
 // node id, so a listing is one query.
 type Store struct {
-	path string
-	db   *sql.DB
-	now  func() time.Time
+	path              string
+	searchBusyTimeout time.Duration
+	db                *sql.DB
+	now               func() time.Time
 	// Serialize local refreshes with export initialization and acknowledgement.
 	exportMu sync.Mutex
 }
@@ -125,7 +126,7 @@ func OpenStore(path string, now func() time.Time) (*Store, error) {
 	// One connection: every operation is short, and none can then find the
 	// database locked by another.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, now: now, path: path}
+	s := &Store{db: db, now: now, path: path, searchBusyTimeout: 5 * time.Second}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)

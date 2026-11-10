@@ -3,17 +3,28 @@ package sessions
 import (
 	"cmp"
 	"context"
+	"errors"
+	"log/slog"
 	"slices"
 	"time"
 )
 
 func (s *Service) LocalSearch(ctx context.Context, q SearchQuery) (out LocalSearchResult, err error) {
 	defer func() {
-		if err != nil && SearchInterrupted(ctx, err) {
-			out.Bound(0, true)
-			out = FinishSearch(out, q)
-			err = nil
+		if err != nil {
+			if SearchInterrupted(ctx, err) {
+				out.Bound(0, true)
+				err = nil
+			} else if errors.Is(err, ErrNoIndex) {
+				err = ErrNoIndex
+			} else {
+				slog.WarnContext(ctx, "local search failed", "err", err)
+				out.Partial = true
+				out.Note = JoinNote(out.Note, searchSourceUnavailableNote)
+				err = nil
+			}
 		}
+		out = FinishSearch(out, q)
 	}()
 	if s.Source == nil {
 		return LocalSearchResult{}, ErrNoIndex
@@ -50,8 +61,13 @@ func (s *Service) LocalSearch(ctx context.Context, q SearchQuery) (out LocalSear
 		if SearchInterrupted(ctx, err) {
 			r.Bound(0, true)
 			err = nil
+		} else if errors.Is(err, ErrNoIndex) {
+			return r, ErrNoIndex
 		} else {
-			return r, err
+			slog.WarnContext(ctx, "local search source failed", "err", err)
+			r.Partial = true
+			r.Note = JoinNote(r.Note, searchSourceUnavailableNote)
+			err = nil
 		}
 	}
 	for i := range r.Hits {
@@ -83,7 +99,8 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 			r.Bound(0, true)
 			return SearchResult{Hits: []SearchHit{}, Nodes: []SearchNode{{ID: s.Self.ID, Name: s.Self.Name, Searched: "none", Partial: true, Note: "could not read the node list; " + r.Note}}}, nil
 		}
-		return SearchResult{}, err
+		slog.WarnContext(ctx, "search node list failed", "err", err)
+		return SearchResult{Hits: []SearchHit{}, Nodes: []SearchNode{{ID: s.Self.ID, Name: s.Self.Name, Searched: "none", Partial: true, Note: searchSourceUnavailableNote}}}, nil
 	}
 
 	if q.Node != "" {
@@ -115,7 +132,8 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 					a.node.Searched = "live"
 				} else {
 					a.node.Partial = true
-					a.node.Note = JoinNote(a.node.Note, e.Error())
+					slog.WarnContext(ctx, "search source failed", "err", e)
+					a.node.Note = JoinNote(a.node.Note, searchSourceUnavailableNote)
 				}
 			} else {
 				copyCtx, stopCopy := context.WithTimeout(ctx, 8*time.Second)
@@ -154,7 +172,8 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 					}
 					if e != nil {
 						a.node.Partial = true
-						a.node.Note = JoinNote(a.node.Note, e.Error())
+						slog.WarnContext(ctx, "search source failed", "err", e)
+						a.node.Note = JoinNote(a.node.Note, searchSourceUnavailableNote)
 						if SearchInterrupted(ctx, e) {
 							a.r.Bound(0, true)
 						}
@@ -166,6 +185,7 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 			if a.r.Note != "" {
 				a.node.Note = JoinNote(a.node.Note, a.r.Note)
 			}
+			a.node.Note = partialNote(a.node.Note, a.node.Partial)
 			for i := range a.r.Hits {
 				h := &a.r.Hits[i]
 				h.NodeID = n.ID

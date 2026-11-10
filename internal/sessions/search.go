@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"slices"
 	"strconv"
@@ -207,12 +208,41 @@ func (r *LocalSearchResult) SideCoverage(since int64) {
 	}
 	r.Note = JoinNote(r.Note, note)
 }
-func (r *LocalSearchResult) Missing(count int, reason string) {
+
+const searchSourceUnavailableNote = "local source unavailable; narrow the query or retry"
+
+// MissingReason is shared by local readers and copies; truncation is a
+// distinct cause rather than an ambiguous alternative to missing fields.
+func MissingReason(q SearchQuery, incomplete bool) string {
+	if incomplete {
+		return "incomplete copies"
+	}
+	if q.FileFilter() {
+		return "file records unavailable"
+	}
+	return "message structure unavailable"
+}
+func (r *LocalSearchResult) Missing(count int, newest int64, reason string, copies bool) {
 	if count == 0 {
 		return
 	}
 	r.Partial = true
-	r.Note = JoinNote(r.Note, fmt.Sprintf("%s in %d matching session(s); refresh the source/copies or narrow --agent, --project, --since or --until", reason, count))
+	note := fmt.Sprintf("%s in %d matching session(s)", reason, count)
+	if newest > 0 {
+		note += ", newest " + time.UnixMilli(newest).UTC().Format(time.RFC3339Nano) + "; add --since after it to leave them out"
+	} else {
+		note += "; narrow --agent or --project to leave them out"
+	}
+	if copies {
+		note += "; refresh the copies to retry"
+	}
+	r.Note = JoinNote(r.Note, note)
+}
+func partialNote(note string, partial bool) string {
+	if partial {
+		return strings.ReplaceAll(note, "message text searched completely; ", "")
+	}
+	return note
 }
 func (q SearchQuery) FileFilter() bool { return q.File != "" || q.Op != "" }
 func JoinNote(a, b string) string {
@@ -422,6 +452,7 @@ func SortHits(h []SearchHit) {
 	})
 }
 func FinishSearch(r LocalSearchResult, q SearchQuery) LocalSearchResult {
+	r.Note = partialNote(r.Note, r.Partial)
 	if q.BySession {
 		if len(r.Hits) > 0 {
 			r.Sessions = append(r.Sessions, groupHits(r.Hits)...)
@@ -473,13 +504,23 @@ func FinishSearch(r LocalSearchResult, q SearchQuery) LocalSearchResult {
 // ScanSearch scans recent ACP sessions without storing local message rows.
 func ScanSearch(ctx context.Context, source Source, q SearchQuery) (out LocalSearchResult, err error) {
 	var through int64
-	missing := map[string]bool{}
+	missing := map[string]int64{}
+	unreadable := map[string]int64{}
 	defer func() {
 		if SearchInterrupted(ctx, err) {
 			out.Bound(through, !errors.Is(err, ErrSearchBound))
 			err = nil
 		}
-		out.Missing(len(missing), "message structure unavailable")
+		var newest int64
+		for _, at := range missing {
+			newest = max(newest, at)
+		}
+		out.Missing(len(missing), newest, MissingReason(q, false), false)
+		newest = 0
+		for _, at := range unreadable {
+			newest = max(newest, at)
+		}
+		out.Missing(len(unreadable), newest, "session unreadable", false)
 		out = FinishSearch(out, q)
 	}()
 	list := q.LocalSessions
@@ -519,13 +560,20 @@ func ScanSearch(ctx context.Context, source Source, q SearchQuery) (out LocalSea
 					level = s.Structure
 				}
 				if q.TimeMatch(m, s) && (!q.CallFilter() || m.Role != "user") && ((m.Kind == "" && q.NeedsStructure()) || (level < 2 && q.FileFilter())) {
-					missing[s.Key] = true
+					missing[s.Key] = s.UpdatedAt
 				}
 				out.Hits = append(out.Hits, MatchMessage(q, s, m)...)
 				after = m.ID
 			}
 			if err != nil {
-				return out, err
+				if SearchInterrupted(ctx, err) {
+					return out, err
+				}
+				slog.WarnContext(ctx, "session search read failed", "err", err)
+				unreadable[s.Key] = s.UpdatedAt
+				delete(missing, s.Key)
+				err = nil
+				break
 			}
 			if !more || len(msgs) == 0 {
 				break
@@ -583,7 +631,8 @@ func (c *Combined) Search(ctx context.Context, q SearchQuery) (LocalSearchResult
 				v.r.Bound(0, !errors.Is(v.e, ErrSearchBound))
 			} else {
 				v.r.Partial = true
-				v.r.Note = JoinNote(v.r.Note, "local source unavailable; narrow the query or retry: "+v.e.Error())
+				slog.WarnContext(ctx, "local search source failed", "err", v.e)
+				v.r.Note = JoinNote(v.r.Note, searchSourceUnavailableNote)
 			}
 		}
 		out.Hits = append(out.Hits, v.r.Hits...)

@@ -43,10 +43,15 @@ const searchMessageJoin = ` FROM messages m JOIN scope s ON s.key=m.session_key 
 func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out sessions.LocalSearchResult, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	var through int64
+	var through, sideThrough int64
+	sideOnly := false
 	defer func() {
-		if sessions.SearchInterrupted(ctx, err) {
-			out.Bound(through, !errors.Is(err, sessions.ErrSearchBound))
+		if err != nil && sessions.SearchInterrupted(ctx, err) {
+			if sideOnly {
+				out.SideCoverage(sideThrough)
+			} else {
+				out.Bound(through, !errors.Is(err, sessions.ErrSearchBound))
+			}
 			err = nil
 		}
 		out = sessions.FinishSearch(out, q)
@@ -62,6 +67,10 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 	defer tx.Rollback()
 	format, err := x.structure(ctx, tx)
 	if err != nil {
+		return out, err
+	}
+	if len(q.Terms) == 0 {
+		err = x.searchFiltered(ctx, tx, q, format, &out, &through)
 		return out, err
 	}
 	var tri, cjk []string
@@ -97,68 +106,23 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 	}
 	cte, args := searchScope(q, format)
 	from := searchMessageJoin
-	where := []string{"1"}
-	if q.Since > 0 {
-		where = append(where, "coalesce(nullif(m.ts,0),s.updated_at)>=?")
-		args = append(args, q.Since)
+	affected, newest, e := missingStructure(ctx, tx, cte, args, q, format)
+	if e != nil {
+		return out, e
+	}
+	out.Missing(affected, newest, sessions.MissingReason(q, false), false)
+	where, filterArgs := searchPredicates(q, format)
+	args = append(args, filterArgs...)
+	// Establish a safe empty side-coverage interval before any expensive work.
+	// updated_at was checked against every message timestamp on the real index.
+	meta, metaArgs := searchScope(q, "")
+	if e = tx.QueryRowContext(ctx, meta+`SELECT coalesce(max(updated_at),0) FROM scope`, metaArgs...).Scan(&sideThrough); e != nil {
+		return out, e
 	}
 	if q.Until > 0 {
-		where = append(where, "coalesce(nullif(m.ts,0),s.updated_at)<=?")
-		args = append(args, q.Until)
+		sideThrough = min(sideThrough, q.Until)
 	}
-	if q.NeedsStructure() {
-		missing := "s.valid=0"
-		if q.FileFilter() && format != "2" {
-			missing = "1"
-		}
-		var affected int
-		relevant := ""
-		if q.CallFilter() {
-			relevant = " AND coalesce(m.role,'')<>'user'"
-		}
-		err = tx.QueryRowContext(ctx, cte+`SELECT count(DISTINCT m.session_key)`+from+` WHERE `+strings.Join(where, " AND ")+relevant+` AND (`+missing+`)`, args...).Scan(&affected)
-		if err != nil {
-			return out, err
-		}
-		reason := "message structure unavailable"
-		if q.FileFilter() {
-			reason = "file records unavailable"
-		}
-		out.Missing(affected, reason)
-		where = append(where, "s.valid=1")
-		if q.FileFilter() && format != "2" {
-			where = append(where, "0")
-		}
-	}
-	if q.Kind != "" && format != "" {
-		where = append(where, "coalesce((SELECT kind FROM message_extras e WHERE e.session_key=m.session_key AND e.seq=m.seq),'text')=?")
-		args = append(args, q.Kind)
-	}
-	if q.CallFilter() {
-		if format == "" {
-			where = append(where, "0")
-		} else {
-			calls := []string{"c.session_key=m.session_key", "c.seq=m.seq"}
-			if q.Tool != "" {
-				calls = append(calls, "c.name=?")
-				args = append(args, q.Tool)
-			}
-			if q.Errors {
-				calls = append(calls, "c.is_error=1")
-			}
-			if q.FileFilter() && format == "2" {
-				if !q.Failed && !q.Errors {
-					calls = append(calls, "c.is_error=0")
-				}
-				file, fa := sessions.FileSQL("f.path", q.File)
-				op, oa := q.OpSQL("f.op")
-				args = append(args, fa...)
-				args = append(args, oa...)
-				calls = append(calls, "EXISTS(SELECT 1 FROM tool_files f WHERE f.session_key=c.session_key AND f.seq=c.seq AND f.idx=c.idx AND "+file+" AND "+op+")")
-			}
-			where = append(where, "EXISTS(SELECT 1 FROM tool_calls c WHERE "+strings.Join(calls, " AND ")+")")
-		}
-	}
+	sideThrough++
 	type candidate struct {
 		id    int64
 		valid bool
@@ -257,6 +221,7 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 		}
 	}
 	if len(q.Terms) > 0 {
+		sideOnly = len(tri) > 0 || len(cjk) > 0
 		// Bound before LIKE, including short-word body scans. This range already
 		// includes every metadata, time and structural predicate above.
 		recent := cte[:len(cte)-1] + `, recent AS MATERIALIZED (SELECT m.id,s.valid,coalesce(nullif(m.ts,0),s.updated_at) at` + from + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY coalesce(nullif(m.ts,0),s.updated_at) DESC,m.id DESC LIMIT ` + fmt.Sprint(sideScanMessages+1) + `) `
@@ -290,7 +255,15 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 			read := 0
 			cut := false
 			var cutoff int64
-			flush := func() error { e := load(batch, false); batch = batch[:0]; through = cutoff; return e }
+			flush := func() error {
+				e := load(batch, false)
+				if e == nil && read > 0 {
+					sideThrough = cutoff
+				}
+				batch = batch[:0]
+				through = cutoff
+				return e
+			}
 			for rows.Next() {
 				var c candidate
 				var match bool
@@ -323,6 +296,9 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 					if !skip {
 						batch = append(batch, c)
 					}
+				}
+				if len(batch) == 0 {
+					sideThrough = cutoff
 				}
 				if len(batch) == 128 {
 					if e = flush(); e != nil {
@@ -481,4 +457,227 @@ func bodyCandidateQuery(cte, from string, where []string, indexed bool) string {
 		from = strings.Replace(from, "JOIN scope s", "CROSS JOIN scope s", 1)
 	}
 	return cte + `SELECT m.id,s.valid,coalesce(nullif(m.ts,0),s.updated_at)` + from + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY coalesce(nullif(m.ts,0),s.updated_at) DESC,s.key,m.id ASC LIMIT ?`
+}
+
+func messageTimeWhere(q sessions.SearchQuery) ([]string, []any) {
+	var args []any
+	where := []string{"1"}
+	if q.Since > 0 {
+		where = append(where, "coalesce(nullif(m.ts,0),s.updated_at)>=?")
+		args = append(args, q.Since)
+	}
+	if q.Until > 0 {
+		where = append(where, "coalesce(nullif(m.ts,0),s.updated_at)<=?")
+		args = append(args, q.Until)
+	}
+	return where, args
+}
+
+func searchPredicates(q sessions.SearchQuery, format string) ([]string, []any) {
+	where, args := messageTimeWhere(q)
+	if q.NeedsStructure() {
+		where = append(where, "s.valid=1")
+		if q.FileFilter() && format != "2" {
+			where = append(where, "0")
+		}
+	}
+	if q.Kind != "" && format != "" {
+		where = append(where, "coalesce((SELECT kind FROM message_extras e WHERE e.session_key=m.session_key AND e.seq=m.seq),'text')=?")
+		args = append(args, q.Kind)
+	}
+	if q.CallFilter() {
+		if format == "" {
+			where = append(where, "0")
+		} else {
+			calls := []string{"c.session_key=m.session_key", "c.seq=m.seq"}
+			if q.Tool != "" {
+				calls = append(calls, "c.name=?")
+				args = append(args, q.Tool)
+			}
+			if q.Errors {
+				calls = append(calls, "c.is_error=1")
+			}
+			if q.FileFilter() && format == "2" {
+				if !q.Failed && !q.Errors {
+					calls = append(calls, "c.is_error=0")
+				}
+				file, fa := sessions.FileSQL("f.path", q.File)
+				op, oa := q.OpSQL("f.op")
+				args = append(args, fa...)
+				args = append(args, oa...)
+				calls = append(calls, "EXISTS(SELECT 1 FROM tool_files f WHERE f.session_key=c.session_key AND f.seq=c.seq AND f.idx=c.idx AND "+file+" AND "+op+")")
+			}
+			where = append(where, "EXISTS(SELECT 1 FROM tool_calls c WHERE "+strings.Join(calls, " AND ")+")")
+		}
+	}
+	return where, args
+}
+
+func missingStructure(ctx context.Context, tx *sql.Tx, cte string, args []any, q sessions.SearchQuery, format string) (int, int64, error) {
+	if !q.NeedsStructure() {
+		return 0, 0, nil
+	}
+	where, timeArgs := messageTimeWhere(q)
+	missing := "s.valid=0"
+	if q.FileFilter() && format != "2" {
+		missing = "1"
+	}
+	if q.CallFilter() {
+		where = append(where, "coalesce(m.role,'')<>'user'")
+	}
+	where = append(where, "("+missing+")")
+	var count int
+	var newest int64
+	err := tx.QueryRowContext(ctx, cte+`SELECT count(DISTINCT m.session_key),coalesce(max(s.updated_at),0)`+searchMessageJoin+` WHERE `+strings.Join(where, " AND "), append(args, timeArgs...)...).Scan(&count, &newest)
+	return count, newest, err
+}
+
+// Pure filters walk small groups of sessions, newest upper bound first. This
+// avoids a global message ORDER BY before the first useful result can emerge.
+func (x *Index) searchFiltered(ctx context.Context, tx *sql.Tx, q sessions.SearchQuery, format string, out *sessions.LocalSearchResult, through *int64) (err error) {
+	meta, args := searchScope(q, "")
+	condition := "1"
+	if q.Since > 0 {
+		condition = "updated_at>=?"
+		args = append(args, q.Since)
+	}
+	rows, err := tx.QueryContext(ctx, meta+`SELECT key,coalesce(updated_at,0) FROM scope WHERE `+condition+` ORDER BY updated_at DESC,key`, args...)
+	if err != nil {
+		return err
+	}
+	type header struct {
+		key   string
+		upper int64
+	}
+	var headers []header
+	for rows.Next() {
+		var h header
+		if err = rows.Scan(&h.key, &h.upper); err != nil {
+			break
+		}
+		headers = append(headers, h)
+	}
+	re := rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if re != nil {
+		return re
+	}
+	affected := 0
+	var newest int64
+	defer func() { out.Missing(affected, newest, sessions.MissingReason(q, false), false) }()
+	examined := 0
+	const sessionBatch = 8
+	for first := 0; first < len(headers); first += sessionBatch {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		end := min(first+sessionBatch, len(headers))
+		batch := q
+		batch.AllowedKeys = map[string]int64{}
+		for _, h := range headers[first:end] {
+			batch.AllowedKeys[h.key] = 0
+		}
+		cte, sa := searchScope(batch, format)
+		count, last, e := missingStructure(ctx, tx, cte, sa, batch, format)
+		if e != nil {
+			return e
+		}
+		affected += count
+		newest = max(newest, last)
+		where, wa := searchPredicates(batch, format)
+		sa = append(sa, wa...)
+		limit := sessions.SearchCandidates - examined
+		if !q.BySession {
+			limit = min(limit, q.Limit+1)
+		}
+		rows, e = tx.QueryContext(ctx, bodyCandidateQuery(cte, searchMessageJoin, where, false), append(sa, limit+1)...)
+		if e != nil {
+			return e
+		}
+		var ids []int64
+		valid := map[int64]bool{}
+		overflow := false
+		for rows.Next() {
+			var id, at int64
+			var v bool
+			if e = rows.Scan(&id, &v, &at); e != nil {
+				break
+			}
+			if len(ids) == limit {
+				overflow = true
+				break
+			}
+			ids = append(ids, id)
+			valid[id] = v
+		}
+		re = rows.Err()
+		rows.Close()
+		if e != nil {
+			return e
+		}
+		if re != nil {
+			return re
+		}
+		for start := 0; start < len(ids); start += 16 {
+			hits, e := x.searchBatch(ctx, tx, ids[start:min(start+16, len(ids))], valid, format, q)
+			out.Hits = append(out.Hits, hits...)
+			if e != nil {
+				return e
+			}
+		}
+		examined += len(ids)
+		if overflow {
+			out.More = true
+			if q.BySession || examined == sessions.SearchCandidates {
+				out.Bound(*through, false)
+				return nil
+			}
+		}
+		if end == len(headers) {
+			return nil
+		}
+		// Remaining sessions can contain no timestamp above this upper bound.
+		// +1 keeps the coverage statement inclusive even at tied session times.
+		*through = headers[end].upper + 1
+		if filteredPageComplete(out.Hits, q, headers[end].upper) {
+			out.More = true
+			return nil
+		}
+		if examined >= sessions.SearchCandidates {
+			out.Bound(*through, false)
+			return nil
+		}
+	}
+	return nil
+}
+
+func filteredPageComplete(hits []sessions.SearchHit, q sessions.SearchQuery, nextUpper int64) bool {
+	if q.BySession {
+		byKey := map[string]int64{}
+		for _, h := range hits {
+			byKey[h.Key] = h.UpdatedAt
+		}
+		if len(byKey) < q.Limit {
+			return false
+		}
+		times := make([]int64, 0, len(byKey))
+		for _, at := range byKey {
+			times = append(times, at)
+		}
+		slices.Sort(times)
+		return nextUpper < times[len(times)-q.Limit]
+	}
+	if len(hits) < q.Limit {
+		return false
+	}
+	sessions.SortHits(hits)
+	h := hits[q.Limit-1]
+	at := h.Time
+	if at == 0 {
+		at = h.UpdatedAt
+	}
+	return nextUpper < at
 }
