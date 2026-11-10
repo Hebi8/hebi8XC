@@ -569,12 +569,13 @@ func (x *Index) searchFiltered(ctx context.Context, tx *sql.Tx, q sessions.Searc
 	var newest int64
 	defer func() { out.Missing(affected, newest, sessions.MissingReason(q, false), false) }()
 	examined := 0
-	const sessionBatch = 8
-	for first := 0; first < len(headers); first += sessionBatch {
+	// Batches start small, so the newest sessions answer quickly, and double, so
+	// a filter that matches little reaches the oldest sessions in a few statements.
+	for first, size := 0, 8; first < len(headers); first, size = min(first+size, len(headers)), min(size*2, 1024) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		end := min(first+sessionBatch, len(headers))
+		end := min(first+size, len(headers))
 		batch := q
 		batch.AllowedKeys = map[string]int64{}
 		for _, h := range headers[first:end] {
