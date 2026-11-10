@@ -98,3 +98,28 @@ func TestSideCancellationKeepsCompleteIndexedBody(t *testing.T) {
 		})
 	}
 }
+
+// Grouped filter batches take every remaining candidate, so they stay at
+// eight sessions: 24 sessions of 500 calls each fill ten groups in two such
+// batches (8,000 candidates), while a doubled second batch of 16 sessions would
+// need 8,000 of the 6,000 left and stop at the candidate limit.
+func TestGroupedFilterBatchesStayWithinCandidates(t *testing.T) {
+	d := waketest.New(t, t.TempDir())
+	for i := 0; i < 24; i++ {
+		d.Put(waketest.Session{Key: fmt.Sprintf("codex:%02d", i), UpdatedAt: int64(100000 - i)})
+	}
+	d.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<500)
+ INSERT INTO messages(session_key, seq, role, ts, text) SELECT s.key, n.i, 'assistant', s.updated_at-501+n.i, 'call' FROM sessions s, n`)
+	d.Exec(`UPDATE sessions SET message_count=(SELECT count(*) FROM messages WHERE session_key=sessions.key)`)
+	d.Exec(waketest.StructureSchema)
+	d.Exec(`INSERT INTO tool_calls SELECT session_key, seq, 0, 'c'||id, 'Bash', NULL, NULL, 0, NULL FROM messages`)
+	for i := 0; i < 24; i++ {
+		d.SealStructure(fmt.Sprintf("codex:%02d", i))
+	}
+	x := Open(d.Path)
+	defer x.Close()
+	r, e := x.Search(context.Background(), sessions.SearchQuery{Tool: "Bash", BySession: true, Limit: 10})
+	if e != nil || r.Partial || len(r.Sessions) != 10 || r.Sessions[0].Key != "codex:00" {
+		t.Fatal(len(r.Sessions), r.Partial, r.Note, e)
+	}
+}

@@ -33,20 +33,17 @@ A read-only ACP adapter check listed 218 of 219 local database files: 107 with m
 
 Phase 1 checks on one machine: 107 ACP transcripts, 2,314 steps, all matching database step indices, types and creation times to the transcript's second precision. A fresh temporary fork index held 5,480 sessions across six agents and 135,860 calls. `h8c show --json` returned calls for one real session per agent and the longest full message intact (474,847 characters, 554,120 UTF-8 bytes). Two loopback nodes, this build and `85465b9`, listed and read each other both ways; a copy made by the old build refreshed after the reader was upgraded. Phase 1 was deployed to four machines on 2026-11-03 and the fifth on 2026-11-10. A later counts-only transcript check covered 109 files and 2,436 steps: 708 planner steps had input tokens, none had output tokens without input tokens, and five non-planner steps with tokens were checkpoints. The other non-message types were six checkpoints and seven system messages, not omitted tool-result types. Checkpoint usage is not exposed by the Phase 1 user/planner message reader. A fresh stock Wake 0.9.2 temporary index (2,316 sessions) was also readable as text, with the structure fallback logged once. No installed node or index was changed.
 
-Phase 3 final-round measurements (2026-11-10), counts/timings only. SQLite backups were read without modifying the online index or service. The Wake backup held 5,786 local sessions and 91,539 messages; a full read-only timestamp check found **zero messages in zero sessions** later than sessions.updated_at. Pure filters therefore use that verified session upper bound. Queries used LocalSearch/Combined with 5,908 published keys, 299 ACP keys, limit 50 and a four-second budget. Before each cold query, backup files were synced and evicted with POSIX_FADV_DONTNEED; the same query then ran hot in the same process.
+Phase 3 final measurements (2026-11-10, review of the last core round), counts and timings only. Read-only SQLite backups of one machine's Wake index and ACP databases: 5,785 local sessions and 91,580 messages, none later than its session's updated_at, which pure filters therefore use as each session's upper bound. LocalSearch/Combined with 5,907 published keys (299 ACP), limit 50 and the four-second peer budget. Cold: the backup files synced and evicted with POSIX_FADV_DONTNEED in the same process. Hot: the second rerun; the first rerun after a cold run cut by the budget is still partly cold. Two rounds each, ranges over both.
 
-| Query | Cache | ms | Returned hits | partial | scanned_since | Note categories |
-| --- | --- | ---: | --- | --- | ---: | --- |
-| tool Bash | cold | 396 | 50 | yes | absent | missing structure |
-| tool Bash | hot | 383 | 50 | yes | absent | missing structure |
-| file store.go | cold | 4001 | 1 | yes | absent | time budget, missing files |
-| file store.go | hot | 3299 | 1 | yes | absent | missing files |
-| error, by session | cold | 4004 | 770 in 50 groups | no | 1793971939295 | side coverage |
-| error, by session | hot | 915 | 776 in 50 groups | no | 1793779738129 | side coverage |
-| error, tool Bash | cold | 4004 | 50 | yes | 1794276425866 | missing structure, side coverage |
-| error, tool Bash | hot | 3177 | 50 | yes | 1792589251800 | missing structure, side coverage |
+| Query | Cold ms | Hot ms | Returned hits | partial | Note categories |
+| --- | ---: | ---: | --- | --- | --- |
+| tool Bash | 568–660 | 301–313 | 50, all Wake | yes | missing structure (4 ACP sessions) |
+| file store.go | 4002 | 568–569 | 1 | yes | time budget with examined-through, missing files (4 ACP sessions) |
+| errors | 651–871 | 311–313 | 50, all Wake | yes | missing structure (4 ACP sessions) |
+| error, by session | 3664–4003 | 815–822 | 785–797 in 50 groups | no | side coverage |
+| error, tool Bash | 4004 | 691–864 | 50 | yes | side coverage, missing structure (4 ACP sessions) |
 
-All eight calls returned without an error. The cold pure-filter calls retained matches; a side-only timeout after indexed body completion did not make the grouped query partial. Structural notes include affected-session counts and newest timestamps. Deterministic tests cancel reads in a later session batch and during side scanning, skip one unreadable ACP session while retaining another, reject raw-error disclosure, remove contradictory completeness wording, exercise BUSY with an injected short wait and BEGIN EXCLUSIVE, and assign a fixed file mtime to an empty ACP fixture. All temporary databases and probes were removed after measurement. No export was run.
+Every call returned without an error. Cold pure filters keep what they found: `file store.go` examined 3,241 of 5,785 sessions within the budget and kept its one hit, where the single sorted statement before had returned none. The side-only cutoff of `error, tool Bash` reports side coverage, not an exhausted budget. The structural partials come from four Antigravity sessions without transcripts, newest 2026-10-04; Wake alone had none. Grouped pure filters keep batches of eight sessions: with doubling, 2 of 40 grouped queries had stopped at the candidate limit with complete results. Deterministic tests cancel reads in a later session batch and during side scanning, skip one unreadable ACP session while retaining another, reject raw-error disclosure, remove contradictory completeness wording, exercise BUSY with an injected short wait and BEGIN EXCLUSIVE, assign a fixed file mtime to an empty ACP fixture, and fill ten groups from 24 sessions of 500 calls within the candidate budget. All temporary databases and probes were removed after measurement. No export was run.
 
 The earlier review confirmed the schema-2 rollback chain and the cross-version protocol. This round adds no protocol field and leaves every original protocol sample unchanged.
 
@@ -69,6 +66,8 @@ Roughly in the order that seems most useful. Structured sessions Phase 1, the Go
 
 ## Small things left open
 
+- Deferred: side coverage at a shared timestamp. A cut thinking/full-input scan reports its last timestamp as searched, so unread messages of that same millisecond count as covered (on one machine 6,064 of 91,580 messages share a timestamp; a cut overstates by a few). Reporting the cutoff plus one millisecond would be exact.
+- Deferred: a short-word body scan cut between loads states coverage through the last row read, including up to 127 matches not yet loaded.
 - Deferred S8: a read transaction can slow writers. Measured contention is acceptable for now; WAL or shorter read transactions can be evaluated later.
 - Deferred ACP two-step “no calls” declarations: only two of four observed cases could support that declaration, and the rule would be empirical. Wait for documented ACP format semantics.
 

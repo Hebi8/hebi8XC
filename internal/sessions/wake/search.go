@@ -571,7 +571,14 @@ func (x *Index) searchFiltered(ctx context.Context, tx *sql.Tx, q sessions.Searc
 	examined := 0
 	// Batches start small, so the newest sessions answer quickly, and double, so
 	// a filter that matches little reaches the oldest sessions in a few statements.
-	for first, size := 0, 8; first < len(headers); first, size = min(first+size, len(headers)), min(size*2, 1024) {
+	// A grouped batch takes every remaining candidate and the page is judged only
+	// after a whole batch, so a doubled one could spend the candidate budget on
+	// sessions past a page that smaller batches complete: grouped batches stay at 8.
+	grow := 2
+	if q.BySession {
+		grow = 1
+	}
+	for first, size := 0, 8; first < len(headers); first, size = min(first+size, len(headers)), min(size*grow, 1024) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
