@@ -129,7 +129,7 @@ func fill(desk, laptop, attic *waketest.DB, now time.Time) Data {
 		db.Exec(waketest.StructureSchema)
 		db.Exec(`INSERT OR REPLACE INTO structure_sessions
  SELECT key,file_mtime,file_size,(SELECT value FROM schema_meta WHERE key='fts_format'),
- (SELECT count(*) FROM messages WHERE session_key=s.key),'1' FROM sessions s`)
+ (SELECT count(*) FROM messages WHERE session_key=s.key),(SELECT value FROM schema_meta WHERE key='structure_format') FROM sessions s`)
 	}
 	return d
 }
