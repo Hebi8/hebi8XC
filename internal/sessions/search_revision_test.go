@@ -245,7 +245,7 @@ func TestCopySQLFiltersPrecedeCandidateLimit(t *testing.T) {
 		t.Fatal(e)
 	}
 	feed, _ := laptop.Store.Feed(ctx, desk.Self.ID)
-	if e = laptop.Store.UseCopy(ctx, desk.Self.ID, "codex:example", feed.Epoch, gen, 1, true, 1); e != nil {
+	if e = laptop.Store.UseCopy(ctx, desk.Self.ID, "codex:example", feed.Epoch, gen, 1, true, 1, ptrLevel(2)); e != nil {
 		t.Fatal(e)
 	}
 	for _, group := range []bool{false, true} {
@@ -300,3 +300,5 @@ func TestSearchMetadataCancellationIsPartial(t *testing.T) {
 		t.Fatal(r, e)
 	}
 }
+
+func ptrLevel(n int) *int { return &n }

@@ -142,6 +142,10 @@ func OpenStore(path string, now func() time.Time) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(copyStructureSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := s.Epoch(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)
@@ -555,18 +559,19 @@ func (s *Store) Feeds(ctx context.Context) (map[string]Feed, error) {
 
 // Cached describes the copy of another node's session that is kept here.
 type Cached struct {
-	Format    int
-	Rev       int64 // revision of the session the copy was made from
-	Complete  bool  // false if the copy stops before the end of the session
-	FetchedAt time.Time
-	gen       int64
+	StructureLevel *int
+	Format         int
+	Rev            int64 // revision of the session the copy was made from
+	Complete       bool  // false if the copy stops before the end of the session
+	FetchedAt      time.Time
+	gen            int64
 }
 
 // Cached returns the copy of a session's messages. ok is false if there is none.
 func (s *Store) Cached(ctx context.Context, node, key string) (c Cached, ok bool, err error) {
 	var fetched int64
-	err = s.db.QueryRowContext(ctx, `SELECT gen, rev, complete, fetched_at, format FROM content WHERE node = ? AND key = ?`,
-		node, key).Scan(&c.gen, &c.Rev, &c.Complete, &fetched, &c.Format)
+	err = s.db.QueryRowContext(ctx, `SELECT c.gen,c.rev,c.complete,c.fetched_at,c.format,cs.level FROM content c LEFT JOIN copy_structure cs ON cs.node=c.node AND cs.key=c.key AND cs.gen=c.gen AND cs.rev=c.rev WHERE c.node=? AND c.key=?`,
+		node, key).Scan(&c.gen, &c.Rev, &c.Complete, &fetched, &c.Format, &c.StructureLevel)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Cached{}, false, nil
 	}
@@ -623,7 +628,7 @@ var ErrFeedChanged = errors.New("the node's session feed changed meanwhile")
 // made while the node's feed had the given epoch; if the feed on record is
 // another one by now, or the session is gone from it, the copy describes
 // something that no longer exists and ErrFeedChanged is returned instead.
-func (s *Store) UseCopy(ctx context.Context, node, key, epoch string, gen, rev int64, complete bool, format int) error {
+func (s *Store) UseCopy(ctx context.Context, node, key, epoch string, gen, rev int64, complete bool, format int, level *int) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -643,6 +648,9 @@ func (s *Store) UseCopy(ctx context.Context, node, key, epoch string, gen, rev i
 		ON CONFLICT(node, key) DO UPDATE SET gen = excluded.gen, rev = excluded.rev,
 		  complete = excluded.complete, fetched_at = excluded.fetched_at, format=excluded.format`,
 		node, key, gen, rev, complete, s.now().UnixMilli(), format); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO copy_structure(node,key,gen,rev,level) VALUES(?,?,?,?,?)`, node, key, gen, rev, level); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE node = ? AND key = ? AND gen <> ?`, node, key, gen); err != nil {

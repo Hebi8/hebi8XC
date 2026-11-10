@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -95,26 +96,39 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 	var through int64
 	defer func() {
 		if SearchInterrupted(ctx, err) {
-			out.Bound(through)
+			out.Bound(through, !errors.Is(err, ErrSearchBound))
 			err = nil
+		}
+		if err != nil {
+			var code interface{ Code() int }
+			if errors.As(err, &code) && (code.Code()&255) == 5 {
+				out.Partial = true
+				out.Note = JoinNote(out.Note, "copy search waited for a writer for 5 seconds; results are incomplete; retry after the copy finishes")
+				err = nil
+			}
 		}
 		out = FinishSearch(out, q)
 	}()
 	// A dedicated read connection avoids monopolizing the store's write/feed
-	// connection. Bounded queries release SQLite read locks between batches.
-	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: filepath.ToSlash(s.path), RawQuery: "mode=ro&_pragma=busy_timeout(1000)"}).String()
+	// connection. One read snapshot covers both coverage checks and results.
+	dsn := (&url.URL{Scheme: "file", OmitHost: true, Path: filepath.ToSlash(s.path), RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return out, false, err
 	}
 	defer db.Close()
+	tx, err := db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return out, false, err
+	}
+	defer tx.Rollback()
 	var count int
-	err = db.QueryRowContext(ctx, "SELECT count(*) FROM content WHERE node=?", node).Scan(&count)
+	err = tx.QueryRowContext(ctx, "SELECT count(*) FROM content WHERE node=?", node).Scan(&count)
 	held = count > 0
 	if err != nil || !held {
 		return out, held, err
 	}
-	where := []string{"m.node=?", "s.deleted=0"}
+	where := []string{"s.node=?", "s.deleted=0"}
 	args := []any{node}
 	if q.Agent != "" {
 		where = append(where, "s.agent=?")
@@ -124,6 +138,16 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 		where = append(where, `(s.project LIKE ? ESCAPE '\' OR s.project_path LIKE ? ESCAPE '\')`)
 		args = append(args, Like(q.Project), Like(q.Project))
 	}
+	scopeWhere := append([]string{}, where...)
+	scopeArgs := append([]any{}, args...)
+	if q.Since > 0 {
+		scopeWhere = append(scopeWhere, "s.updated_at>=?")
+		scopeArgs = append(scopeArgs, q.Since)
+	}
+	if q.Until > 0 {
+		scopeWhere = append(scopeWhere, "s.created_at<=?")
+		scopeArgs = append(scopeArgs, q.Until)
+	}
 	if q.Since > 0 {
 		where = append(where, "coalesce(nullif(m.ts,0),s.updated_at)>=?")
 		args = append(args, q.Since)
@@ -132,15 +156,43 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 		where = append(where, "coalesce(nullif(m.ts,0),s.updated_at)<=?")
 		args = append(args, q.Until)
 	}
-	from := ` FROM messages m JOIN content c ON c.node=m.node AND c.key=m.key AND c.gen=m.gen JOIN sessions s ON s.node=m.node AND s.key=m.key `
+	from := ` FROM messages m JOIN content c ON c.node=m.node AND c.key=m.key AND c.gen=m.gen JOIN sessions s ON s.node=m.node AND s.key=m.key LEFT JOIN copy_structure cs ON cs.node=c.node AND cs.key=c.key AND cs.gen=c.gen AND cs.rev=c.rev `
+	// An incomplete copy can hide later assistant rows even if its retained
+	// prefix contains only users or lies before the message time window.
+	affectedSQL := `SELECT s.key FROM content c JOIN sessions s ON s.node=c.node AND s.key=c.key WHERE ` + strings.Join(scopeWhere, " AND ") + ` AND c.complete=0`
+	affectedArgs := append([]any{}, scopeArgs...)
+	missing := []string{"c.complete=0"}
 	if q.NeedsStructure() {
-		var partial bool
-		err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1"+from+" WHERE "+strings.Join(where, " AND ")+" AND (c.format=0 OR c.complete=0))", args...).Scan(&partial)
-		if err != nil {
-			return out, held, err
+		structural := []string{"m.kind=''"}
+		if q.FileFilter() {
+			structural = append(structural, "coalesce(cs.level,0)<2")
 		}
-		out.Partial = partial
-		where = append(where, "c.format>0")
+		if q.CallFilter() {
+			structural = append(structural, "m.calls_dropped>0")
+		}
+		condition := "(" + strings.Join(structural, " OR ") + ")"
+		if q.CallFilter() {
+			condition = "(m.role<>'user' AND " + condition + ")"
+		}
+		missing = append(missing, condition)
+	}
+	affectedSQL += " UNION SELECT s.key" + from + " WHERE " + strings.Join(where, " AND ") + " AND (" + strings.Join(missing, " OR ") + ")"
+	affectedArgs = append(affectedArgs, args...)
+	var affected int
+	err = tx.QueryRowContext(ctx, "SELECT count(*) FROM ("+affectedSQL+")", affectedArgs...).Scan(&affected)
+	if err != nil {
+		return out, held, err
+	}
+	reason := "incomplete copies"
+	if q.NeedsStructure() {
+		reason = "message structure or complete copies unavailable"
+	}
+	if q.FileFilter() {
+		reason = "file records or complete copies unavailable"
+	}
+	out.Missing(affected, reason)
+	if q.NeedsStructure() {
+		where = append(where, "m.kind<>''")
 	}
 	if q.Kind != "" {
 		where = append(where, "m.kind=?")
@@ -155,7 +207,7 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 	if q.Errors {
 		callWhere = append(callWhere, "json_extract(tc.value,'$.error')=1")
 	}
-	if q.File != "" {
+	if q.FileFilter() {
 		file, fa := FileSQL("f.path", q.File)
 		op, oa := q.OpSQL("f.op")
 		cf := []string{"f.node=m.node", "f.key=m.key", "f.gen=m.gen", "f.id=m.id", "f.call=tc.key", file, op}
@@ -236,7 +288,7 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 			ga = append(ga, callArgs...)
 			ga = append(ga, a...)
 		}
-		rows, e := db.QueryContext(ctx, base+strings.Join(branches, " UNION ALL ")+`) SELECT key,title,project,updated_at,rev,count(*),min(id),max(id),(SELECT count(*) FROM base)>10000 FROM hits GROUP BY key UNION ALL SELECT '', '', '',0,0,0,0,0,1 WHERE (SELECT count(*) FROM base)>10000 AND NOT EXISTS(SELECT 1 FROM hits) ORDER BY updated_at DESC,key LIMIT ?`, append(ga, q.Limit+1)...)
+		rows, e := tx.QueryContext(ctx, base+strings.Join(branches, " UNION ALL ")+`) SELECT key,title,project,updated_at,rev,count(*),min(id),max(id),(SELECT count(*) FROM base)>10000 FROM hits GROUP BY key UNION ALL SELECT '', '', '',0,0,0,0,0,1 WHERE (SELECT count(*) FROM base)>10000 AND NOT EXISTS(SELECT 1 FROM hits) ORDER BY updated_at DESC,key LIMIT ?`, append(ga, q.Limit+1)...)
 		if e != nil {
 			return out, held, e
 		}
@@ -248,7 +300,7 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 				return out, held, e
 			}
 			if partial {
-				out.Bound(0)
+				out.Bound(0, false)
 			}
 			if g.Hits > 0 {
 				out.Sessions = append(out.Sessions, g)
@@ -256,63 +308,47 @@ func (s *Store) SearchCopies(ctx context.Context, node string, q SearchQuery) (o
 		}
 		return out, held, rows.Err()
 	}
-	// Cursor batches keep cancellation useful and release the read connection's
-	// lock frequently. Structural predicates are already applied by SQLite.
-	offset := 0
-	for offset < SearchCandidates {
-		rows, e := db.QueryContext(ctx, `SELECT m.id,m.seq,m.ts,m.text,m.kind,m.thinking,m.calls,s.key,s.title,s.project,s.project_path,s.agent,s.updated_at,c.rev`+from+" WHERE "+strings.Join(where, " AND ")+` ORDER BY coalesce(nullif(m.ts,0),s.updated_at) DESC,s.key,m.id LIMIT 128 OFFSET ?`, append(args, offset)...)
-		if e != nil {
+	// One statement observes one SQLite snapshot even if another generation
+	// replaces the copy during this search. No OFFSET can skip or repeat rows.
+	rows, e := tx.QueryContext(ctx, `SELECT m.id,m.seq,m.ts,m.text,m.kind,m.thinking,m.calls,s.key,s.title,s.project,s.project_path,s.agent,s.updated_at,c.rev`+from+" WHERE "+strings.Join(where, " AND ")+` ORDER BY coalesce(nullif(m.ts,0),s.updated_at) DESC,s.key,m.id LIMIT 10001`, args...)
+	if e != nil {
+		return out, held, e
+	}
+	defer rows.Close()
+	read := 0
+	for rows.Next() {
+		if read >= SearchCandidates {
+			out.Bound(through, false)
+			break
+		}
+		var m Message
+		var sess Session
+		var rev int64
+		var calls string
+		if e = rows.Scan(&m.ID, &m.Seq, &m.Time, &m.Text, &m.Kind, &m.Thinking, &calls, &sess.Key, &sess.Title, &sess.Project, &sess.ProjectPath, &sess.Agent, &sess.UpdatedAt, &rev); e != nil {
 			return out, held, e
 		}
-		read := 0
-		for rows.Next() {
-			if offset+read >= SearchCandidates {
-				rows.Close()
-				out.Bound(through)
-				return out, held, nil
-			}
-			var m Message
-			var sess Session
-			var rev int64
-			var calls string
-			if e = rows.Scan(&m.ID, &m.Seq, &m.Time, &m.Text, &m.Kind, &m.Thinking, &calls, &sess.Key, &sess.Title, &sess.Project, &sess.ProjectPath, &sess.Agent, &sess.UpdatedAt, &rev); e != nil {
-				break
-			}
-			if e = json.Unmarshal([]byte(calls), &m.Calls); e != nil {
-				break
-			}
-			m.Text, _ = cutBytes(m.Text, 4096)
-			m.Thinking, _ = cutBytes(m.Thinking, 4096)
-			for i := range m.Calls {
-				m.Calls[i].Input, _ = cutBytes(m.Calls[i].Input, 4096)
-			}
-			through = m.Time
-			if through == 0 {
-				through = sess.UpdatedAt
-			}
-			hits := MatchMessage(q, sess, m)
-			for i := range hits {
-				hits[i].Rev = rev
-			}
-			out.Hits = append(out.Hits, hits...)
-			read++
-		}
-		re := rows.Err()
-		rows.Close()
-		if e != nil {
+		if e = json.Unmarshal([]byte(calls), &m.Calls); e != nil {
 			return out, held, e
 		}
-		if re != nil {
-			return out, held, re
+		m.Text, _ = cutBytes(m.Text, 4096)
+		m.Thinking, _ = cutBytes(m.Thinking, 4096)
+		for i := range m.Calls {
+			m.Calls[i].Input, _ = cutBytes(m.Calls[i].Input, 4096)
 		}
-		offset += read
-		if read < 128 {
-			return out, held, nil
+		through = m.Time
+		if through == 0 {
+			through = sess.UpdatedAt
 		}
-		if !q.BySession && len(out.Hits) > q.Limit {
-			return out, held, nil
+		hits := MatchMessage(q, sess, m)
+		for i := range hits {
+			hits[i].Rev = rev
+		}
+		out.Hits = append(out.Hits, hits...)
+		read++
+		if len(out.Hits) > q.Limit {
+			break
 		}
 	}
-	out.Bound(through)
-	return out, held, nil
+	return out, held, rows.Err()
 }

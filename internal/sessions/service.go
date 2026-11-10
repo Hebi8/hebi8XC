@@ -256,11 +256,12 @@ type changesPage struct {
 // Epoch and Rev say which feed, and which revision of the session in it,
 // the messages belong to. Epoch was added later and may be missing.
 type messagesPage struct {
-	Format   int       `json:"format,omitempty"`
-	Epoch    string    `json:"epoch"`
-	Rev      int64     `json:"rev"`
-	Messages []Message `json:"messages"`
-	More     bool      `json:"more"`
+	StructureLevel *int      `json:"structure_level,omitempty"`
+	Format         int       `json:"format,omitempty"`
+	Epoch          string    `json:"epoch"`
+	Rev            int64     `json:"rev"`
+	Messages       []Message `json:"messages"`
+	More           bool      `json:"more"`
 }
 
 // fit returns how many of the items fit into PageBudget bytes of JSON, at
@@ -327,7 +328,7 @@ func (s *Service) LocalMessages(ctx context.Context, key string, after int64, li
 	if err != nil {
 		return messagesPage{}, err
 	}
-	_, rev, ok, err := s.Store.Lookup(ctx, s.Self.ID, key)
+	sess, rev, ok, err := s.Store.Lookup(ctx, s.Self.ID, key)
 	if err != nil {
 		return messagesPage{}, err
 	}
@@ -345,7 +346,7 @@ func (s *Service) LocalMessages(ctx context.Context, key string, after int64, li
 	for i := range msgs {
 		msgs[i] = clampMessage(msgs[i])
 	}
-	return messagesPage{Epoch: epoch, Rev: rev, Messages: msgs, More: more, Format: format}, nil
+	return messagesPage{Epoch: epoch, Rev: rev, Messages: msgs, More: more, Format: format, StructureLevel: structureLevel(sess, msgs)}, nil
 }
 
 // maxPullPages bounds one Pull. A feed longer than that is continued in
@@ -610,14 +611,15 @@ func lessNode(a, b Node) bool {
 
 // Reading is a page of a session, with where it came from.
 type Reading struct {
-	HasBefore bool      `json:"has_before"`
-	Partial   bool      `json:"partial,omitempty"`
-	Rev       int64     `json:"rev"`
-	CopyRev   int64     `json:"copy_rev,omitempty"`
-	Moved     bool      `json:"moved,omitempty"`
-	Format    int       `json:"format,omitempty"`
-	Session   Entry     `json:"session"`
-	Messages  []Message `json:"messages"`
+	StructureLevel *int      `json:"structure_level,omitempty"`
+	HasBefore      bool      `json:"has_before"`
+	Partial        bool      `json:"partial,omitempty"`
+	Rev            int64     `json:"rev"`
+	CopyRev        int64     `json:"copy_rev,omitempty"`
+	Moved          bool      `json:"moved,omitempty"`
+	Format         int       `json:"format,omitempty"`
+	Session        Entry     `json:"session"`
+	Messages       []Message `json:"messages"`
 	// Next is the --after value of the next page, 0 on the last one.
 	Next int64 `json:"next"`
 	// From is "local" for a session of this machine, "peer" when the
@@ -746,12 +748,14 @@ func (s *Service) read(ctx context.Context, node, key string, after int64, limit
 			return Reading{}, err
 		}
 		out.Format = messageFormat(msgs)
+		out.StructureLevel = structureLevel(sess, msgs)
 	} else {
 		cp, err := s.copyOf(ctx, n, key, max(rev, wantRev), &out)
 		if err != nil {
 			return Reading{}, err
 		}
 		out.Format = cp.Format
+		out.StructureLevel = cp.StructureLevel
 		out.CopyRev = cp.Rev
 		out.Rev = cp.Rev
 		if msgs, more, err = s.Store.CachedMessages(ctx, n.ID, key, cp, after, limit, PageBudget); err != nil {
@@ -789,7 +793,7 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 	s.mu.Lock()
 	probedRev, probed := s.probed[[2]string{n.ID, key}]
 	s.mu.Unlock()
-	needsFormat := have.Format < 1 && (!probed || probedRev != rev)
+	needsFormat := (have.Format < 1 || have.StructureLevel == nil) && (!probed || probedRev != rev)
 	if !fresh || needsFormat {
 		for _, p := range s.Peers() {
 			if p.ID != n.ID || !p.Online {
@@ -803,11 +807,11 @@ func (s *Service) copyOf(ctx context.Context, n *Node, key string, rev int64, ou
 				why, code = "cannot be reached from here", ""
 				break
 			}
-			if fresh && have.Format < 1 {
+			if fresh && (have.Format < 1 || have.StructureLevel == nil) {
 				var probe messagesPage
 				path := "/v1/sessions/messages?key=" + url.QueryEscape(key) + "&after=0&limit=1"
 				err := s.Fetch(ctx, p, path, &probe)
-				if err == nil && probe.Format <= have.Format {
+				if err == nil && probe.Format <= have.Format && (have.StructureLevel != nil || probe.StructureLevel == nil) {
 					s.mu.Lock()
 					if s.probed == nil {
 						s.probed = map[[2]string]int64{}
@@ -876,6 +880,7 @@ func (s *Service) fetchCopy(ctx context.Context, p Peer, key string) (made Cache
 
 	var rev, after int64
 	format := 0
+	var level *int
 	size, complete := 0, false
 pages:
 	for n := 0; n < maxCopyPages; n++ {
@@ -897,10 +902,17 @@ pages:
 		if n == 0 {
 			rev = pg.Rev
 			format = pg.Format
+			level = pg.StructureLevel
 		} else {
 			// A growing session can change between pages. Keep the first
 			// revision and the lowest format so a later read can refresh it.
 			format = min(format, pg.Format)
+			if level == nil || pg.StructureLevel == nil {
+				level = nil
+			} else {
+				v := min(*level, *pg.StructureLevel)
+				level = &v
+			}
 		}
 
 		keep := pg.Messages[:0]
@@ -926,7 +938,7 @@ pages:
 			break
 		}
 	}
-	if err := s.Store.UseCopy(ctx, p.ID, key, feed.Epoch, gen, rev, complete, format); err != nil {
+	if err := s.Store.UseCopy(ctx, p.ID, key, feed.Epoch, gen, rev, complete, format, level); err != nil {
 		return Cached{}, err
 	}
 	s.mu.Lock()

@@ -132,7 +132,9 @@ func (s *Service) searchRoute(mux *http.ServeMux, local bool) {
 		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 		defer cancel()
 		if local {
-			pg, err := s.LocalSearch(ctx, q)
+			pc, stop := context.WithTimeout(ctx, 4*time.Second)
+			defer stop()
+			pg, err := s.LocalSearch(pc, q)
 			answer(w, pg, err)
 		} else {
 			pg, err := s.Search(ctx, q)

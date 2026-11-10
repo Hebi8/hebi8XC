@@ -19,7 +19,6 @@ import (
 type SearchQuery struct {
 	LocalSessions                              []Session        // service metadata snapshot avoids reopening ACP databases for search listing
 	AllowedKeys                                map[string]int64 // local feed snapshot; nil means unrestricted
-	ExcludeKeys                                []string         // Combined suppresses native ACP duplicates before limiting Wake hits.
 	Terms                                      []string
 	File, Op, Tool, Kind, Agent, Project, Node string
 	Failed, Errors, BySession                  bool
@@ -33,7 +32,7 @@ var ErrSearchBound = errors.New("search exceeded its work or time limit; narrow 
 
 func (q *SearchQuery) Validate() error {
 	q.File = NormalizePath(q.File)
-	if q.Errors && q.File != "" {
+	if q.Errors && q.FileFilter() {
 		q.Failed = true
 	}
 	if len(q.Terms) > 32 {
@@ -163,6 +162,9 @@ func EscapeLike(t string) string {
 
 // FileSQL uses separator-aligned suffixes. Only the Windows drive letter folds.
 func FileSQL(column, path string) (string, []any) {
+	if path == "" {
+		return "1", nil
+	}
 	path = NormalizePath(path)
 	norm := "replace(" + column + ",char(92),'/')"
 	norm = "(CASE WHEN substr(" + norm + ",2,1)=':' THEN lower(substr(" + norm + ",1,1))||substr(" + norm + ",2) ELSE " + norm + " END)"
@@ -171,7 +173,7 @@ func FileSQL(column, path string) (string, []any) {
 	}
 	return "(" + norm + "=? OR substr(" + norm + ",-(length(?)+1))='/'||?)", []any{path, path, path}
 }
-func (q SearchQuery) CallFilter() bool { return q.File != "" || q.Tool != "" || q.Errors }
+func (q SearchQuery) CallFilter() bool { return q.FileFilter() || q.Tool != "" || q.Errors }
 func (q SearchQuery) OpSQL(column string) (string, []any) {
 	if q.Op == "any" {
 		return "1", nil
@@ -181,14 +183,38 @@ func (q SearchQuery) OpSQL(column string) (string, []any) {
 	}
 	return column + "=?", []any{q.Op}
 }
-func (r *LocalSearchResult) Bound(through int64) {
+
+const searchTimeNote = "search time budget exhausted; results are incomplete; add --project or a narrower --since/--until range"
+const searchCountNote = "search candidate limit reached; results are incomplete; add --project or a narrower --since/--until range"
+
+func (r *LocalSearchResult) Bound(through int64, timedOut bool) {
 	r.Partial = true
-	text := "search budget reached; results are incomplete; narrow the project, file or time range"
-	if through > 0 {
-		text = "searched newest messages through " + time.UnixMilli(through).UTC().Format(time.RFC3339) + "; " + text
+	note := searchCountNote
+	if timedOut {
+		note = searchTimeNote
 	}
-	r.Note = JoinNote(r.Note, text)
+	if through > 0 {
+		note = "messages examined through " + time.UnixMilli(through).UTC().Format(time.RFC3339Nano) + "; " + note
+	}
+	r.Note = JoinNote(r.Note, note)
 }
+func (r *LocalSearchResult) SideCoverage(since int64) {
+	r.ScannedSince = since
+	t := time.UnixMilli(since).UTC()
+	note := "thinking and full tool inputs searched since " + t.Format("2006-01-02 15:04:05 UTC") + "; add --since " + t.Format(time.RFC3339Nano) + " to narrow this scan"
+	if !r.Partial {
+		note = "message text searched completely; " + note
+	}
+	r.Note = JoinNote(r.Note, note)
+}
+func (r *LocalSearchResult) Missing(count int, reason string) {
+	if count == 0 {
+		return
+	}
+	r.Partial = true
+	r.Note = JoinNote(r.Note, fmt.Sprintf("%s in %d matching session(s); refresh the source/copies or narrow --agent, --project, --since or --until", reason, count))
+}
+func (q SearchQuery) FileFilter() bool { return q.File != "" || q.Op != "" }
 func JoinNote(a, b string) string {
 	if a == "" {
 		return b
@@ -207,7 +233,7 @@ func (q SearchQuery) SessionMatch(s Session) bool {
 			return false
 		}
 	}
-	return !slices.Contains(q.ExcludeKeys, s.Key) && (q.Agent == "" || s.Agent == q.Agent) && (q.Project == "" || strings.Contains(strings.ToLower(s.Project+"\n"+s.ProjectPath), strings.ToLower(q.Project)))
+	return (q.Agent == "" || s.Agent == q.Agent) && (q.Project == "" || strings.Contains(strings.ToLower(s.Project+"\n"+s.ProjectPath), strings.ToLower(q.Project)))
 }
 func (q SearchQuery) TimeMatch(m Message, s Session) bool {
 	t := m.Time
@@ -217,7 +243,7 @@ func (q SearchQuery) TimeMatch(m Message, s Session) bool {
 	return (q.Since == 0 || t >= q.Since) && (q.Until == 0 || t <= q.Until)
 }
 func (q SearchQuery) NeedsStructure() bool {
-	return q.File != "" || q.Tool != "" || q.Kind != "" || q.Errors
+	return q.FileFilter() || q.Tool != "" || q.Kind != "" || q.Errors
 }
 func (q SearchQuery) textMatch(text string) bool {
 	text = strings.ToLower(text)
@@ -263,11 +289,12 @@ type SearchSession struct {
 	UpdatedAt int64  `json:"updated_at"`
 }
 type SearchNode struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Searched string `json:"searched"`
-	Partial  bool   `json:"partial,omitempty"`
-	Note     string `json:"note,omitempty"`
+	ScannedSince int64  `json:"scanned_since,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Searched     string `json:"searched"`
+	Partial      bool   `json:"partial,omitempty"`
+	Note         string `json:"note,omitempty"`
 }
 type SearchResult struct {
 	Hits     []SearchHit     `json:"hits"`
@@ -276,11 +303,12 @@ type SearchResult struct {
 	More     bool            `json:"more"`
 }
 type LocalSearchResult struct {
-	Sessions []SearchSession `json:"sessions,omitempty"`
-	Hits     []SearchHit     `json:"hits"`
-	Partial  bool            `json:"partial,omitempty"`
-	More     bool            `json:"more"`
-	Note     string          `json:"note,omitempty"`
+	ScannedSince int64           `json:"scanned_since,omitempty"`
+	Sessions     []SearchSession `json:"sessions,omitempty"`
+	Hits         []SearchHit     `json:"hits"`
+	Partial      bool            `json:"partial,omitempty"`
+	More         bool            `json:"more"`
+	Note         string          `json:"note,omitempty"`
 }
 type SearchSource interface {
 	Search(context.Context, SearchQuery) (LocalSearchResult, error)
@@ -321,7 +349,7 @@ func MatchMessage(q SearchQuery, s Session, m Message) []SearchHit {
 		if q.Tool != "" && c.Tool != q.Tool || q.Errors && !c.Error {
 			continue
 		}
-		if q.File != "" {
+		if q.FileFilter() {
 			if c.Error && !q.Failed && !q.Errors {
 				continue
 			}
@@ -329,7 +357,7 @@ func MatchMessage(q SearchQuery, s Session, m Message) []SearchHit {
 			for _, f := range c.Files {
 				op := q.Op
 				ok := op == "any" || op == f.Op || (op == "" && (f.Op == "change" || f.Op == "delete"))
-				if ok && FileMatch(f.Path, q.File) {
+				if ok && (q.File == "" || FileMatch(f.Path, q.File)) {
 					found = true
 					break
 				}
@@ -445,11 +473,13 @@ func FinishSearch(r LocalSearchResult, q SearchQuery) LocalSearchResult {
 // ScanSearch scans recent ACP sessions without storing local message rows.
 func ScanSearch(ctx context.Context, source Source, q SearchQuery) (out LocalSearchResult, err error) {
 	var through int64
+	missing := map[string]bool{}
 	defer func() {
 		if SearchInterrupted(ctx, err) {
-			out.Bound(through)
+			out.Bound(through, !errors.Is(err, ErrSearchBound))
 			err = nil
 		}
+		out.Missing(len(missing), "message structure unavailable")
 		out = FinishSearch(out, q)
 	}()
 	list := q.LocalSessions
@@ -465,7 +495,7 @@ func ScanSearch(ctx context.Context, source Source, q SearchQuery) (out LocalSea
 	})
 	count := 0
 	for _, s := range list {
-		if !q.SessionMatch(s) || s.Messages == 0 || (q.Since > 0 && s.UpdatedAt < q.Since) || (q.Until > 0 && s.UpdatedAt > q.Until) {
+		if !q.SessionMatch(s) || s.Messages == 0 || (q.Since > 0 && s.UpdatedAt < q.Since) || (q.Until > 0 && s.CreatedAt > q.Until) {
 			continue
 		}
 		var after int64
@@ -488,8 +518,8 @@ func ScanSearch(ctx context.Context, source Source, q SearchQuery) (out LocalSea
 				if level == 0 && m.Kind != "" {
 					level = s.Structure
 				}
-				if q.TimeMatch(m, s) && ((m.Kind == "" && q.NeedsStructure()) || (level < 2 && q.File != "")) {
-					out.Partial = true
+				if q.TimeMatch(m, s) && (!q.CallFilter() || m.Role != "user") && ((m.Kind == "" && q.NeedsStructure()) || (level < 2 && q.FileFilter())) {
+					missing[s.Key] = true
 				}
 				out.Hits = append(out.Hits, MatchMessage(q, s, m)...)
 				after = m.ID
@@ -534,15 +564,6 @@ func (c *Combined) Search(ctx context.Context, q SearchQuery) (LocalSearchResult
 					}
 				}
 			}
-			// The feed has already deduplicated native ACP identities. It is also the
-			// authoritative allow-list, before either source applies its result limit.
-			if i == 0 && q.AllowedKeys != nil {
-				for key := range q.AllowedKeys {
-					if id, ok := strings.CutPrefix(key, "antigravity-acp:"); ok {
-						sourceQuery.ExcludeKeys = append(sourceQuery.ExcludeKeys, "antigravity:"+id)
-					}
-				}
-			}
 			sc, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
 			r, e := searchSource(sc, src, sourceQuery)
@@ -559,7 +580,7 @@ func (c *Combined) Search(ctx context.Context, q SearchQuery) (LocalSearchResult
 		available = true
 		if v.e != nil {
 			if SearchInterrupted(ctx, v.e) {
-				v.r.Bound(0)
+				v.r.Bound(0, !errors.Is(v.e, ErrSearchBound))
 			} else {
 				v.r.Partial = true
 				v.r.Note = JoinNote(v.r.Note, "local source unavailable; narrow the query or retry: "+v.e.Error())
@@ -569,6 +590,7 @@ func (c *Combined) Search(ctx context.Context, q SearchQuery) (LocalSearchResult
 		out.Sessions = append(out.Sessions, v.r.Sessions...)
 		out.Partial = out.Partial || v.r.Partial
 		out.More = out.More || v.r.More
+		out.ScannedSince = max(out.ScannedSince, v.r.ScannedSince)
 		out.Note = JoinNote(out.Note, v.r.Note)
 	}
 	if !available {

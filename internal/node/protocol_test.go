@@ -527,3 +527,61 @@ func TestProtocol1SearchRouteAndOldPeer404(t *testing.T) {
 		t.Error(problem)
 	}
 }
+
+func TestProtocol1FileStructureDeclaration(t *testing.T) {
+	c := newClock()
+	laptop := sessionNode(t, c, "laptop")
+	raw, e := os.ReadFile("testdata/protocol-v1-phase3-coverage/messages.response.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	feed, e := os.ReadFile("testdata/protocol-v1-phase2/sessions.response.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	peer := recordedNode(t, laptop, sample(t, "hello.response.json"), feed, raw)
+	laptop.static = []string{peer.addr}
+	laptop.round()
+	laptop.sessions.Round(context.Background())
+	var r sessions.Reading
+	if e = laptop.control("/v1/sessions/messages?node=desk&key=claude:0f3a9c", &r); e != nil {
+		t.Fatal(e)
+	}
+	if r.StructureLevel == nil || *r.StructureLevel != 2 {
+		t.Fatal("lost page declaration", r.StructureLevel)
+	}
+	// The published field survives storing and reading a copy.
+	if e = laptop.control("/v1/sessions/messages?node=desk&key=claude:0f3a9c", &r); e != nil || r.StructureLevel == nil || *r.StructureLevel != 2 {
+		t.Fatal(r.StructureLevel, e)
+	}
+	desk := sessionNode(t, c, "desk")
+	desk.trust(laptop)
+	laptop.trust(desk)
+	desk.sessions.Source = &structuredProtocolSource{list: []sessions.Session{{Key: "codex:example", Agent: "codex", Structure: 2, Messages: 1}}, messages: []sessions.Message{{ID: 1, Role: "assistant", Kind: "text", Structure: 2}}}
+	desk.sessions.SyncLocal(context.Background())
+	var page struct {
+		StructureLevel *int `json:"structure_level"`
+	}
+	if _, e = laptop.client.Get(context.Background(), desk.addr, "/v1/sessions/messages?key=codex:example", &page, sessions.MaxReply); e != nil || page.StructureLevel == nil || *page.StructureLevel != 2 {
+		t.Fatal(page, e)
+	}
+}
+
+func TestProtocol1SearchCoverageSample(t *testing.T) {
+	raw, e := os.ReadFile("testdata/protocol-v1-phase3-coverage/search.response.json")
+	if e != nil {
+		t.Fatal(e)
+	}
+	var got sessions.LocalSearchResult
+	if e = json.Unmarshal(raw, &got); e != nil {
+		t.Fatal(e)
+	}
+	expected := sessions.LocalSearchResult{}
+	expected.SideCoverage(got.ScannedSince)
+	if got.Note != expected.Note {
+		t.Fatal("coverage sample disagrees with producer")
+	}
+	if got.Partial || got.ScannedSince != 1790841600000 || !strings.Contains(got.Note, "--since") {
+		t.Fatal(got)
+	}
+}

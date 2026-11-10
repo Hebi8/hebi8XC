@@ -10,7 +10,7 @@ import (
 func (s *Service) LocalSearch(ctx context.Context, q SearchQuery) (out LocalSearchResult, err error) {
 	defer func() {
 		if err != nil && SearchInterrupted(ctx, err) {
-			out.Bound(0)
+			out.Bound(0, true)
 			out = FinishSearch(out, q)
 			err = nil
 		}
@@ -48,7 +48,7 @@ func (s *Service) LocalSearch(ctx context.Context, q SearchQuery) (out LocalSear
 	r, err := searchSource(ctx, s.Source, q)
 	if err != nil {
 		if SearchInterrupted(ctx, err) {
-			r.Bound(0)
+			r.Bound(0, true)
 			err = nil
 		} else {
 			return r, err
@@ -80,7 +80,7 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 	if err != nil {
 		if SearchInterrupted(ctx, err) {
 			r := LocalSearchResult{}
-			r.Bound(0)
+			r.Bound(0, true)
 			return SearchResult{Hits: []SearchHit{}, Nodes: []SearchNode{{ID: s.Self.ID, Name: s.Self.Name, Searched: "none", Partial: true, Note: "could not read the node list; " + r.Note}}}, nil
 		}
 		return SearchResult{}, err
@@ -115,7 +115,7 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 					a.node.Searched = "live"
 				} else {
 					a.node.Partial = true
-					a.node.Note = e.Error()
+					a.node.Note = JoinNote(a.node.Note, e.Error())
 				}
 			} else {
 				copyCtx, stopCopy := context.WithTimeout(ctx, 8*time.Second)
@@ -154,16 +154,17 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 					}
 					if e != nil {
 						a.node.Partial = true
-						a.node.Note = e.Error()
+						a.node.Note = JoinNote(a.node.Note, e.Error())
 						if SearchInterrupted(ctx, e) {
-							a.r.Bound(0)
+							a.r.Bound(0, true)
 						}
 					}
 				}
 			}
+			a.node.ScannedSince = a.r.ScannedSince
 			a.node.Partial = a.node.Partial || a.r.Partial
 			if a.r.Note != "" {
-				a.node.Note = a.r.Note
+				a.node.Note = JoinNote(a.node.Note, a.r.Note)
 			}
 			for i := range a.r.Hits {
 				h := &a.r.Hits[i]
@@ -198,7 +199,7 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 			out.More = out.More || a.r.More
 		case <-ctx.Done():
 			for _, n := range pending {
-				out.Nodes = append(out.Nodes, SearchNode{ID: n.ID, Name: n.Name, Searched: "none", Partial: true, Note: "search time budget reached; results are incomplete; narrow the project, file or time range"})
+				out.Nodes = append(out.Nodes, SearchNode{ID: n.ID, Name: n.Name, Searched: "none", Partial: true, Note: searchTimeNote})
 			}
 			pending = nil
 		}

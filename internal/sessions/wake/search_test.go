@@ -105,7 +105,7 @@ func TestSearchCJKBackfillAndBoundedShortScan(t *testing.T) {
 	if e != nil || len(r.Hits) != 1 {
 		t.Fatal(r, e)
 	}
-	d.Exec(`WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<2050) INSERT INTO messages(session_key,seq,role,ts,text) SELECT 'codex:example',x+1,'user',1000+x,'js' FROM n`)
+	d.Exec(`WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<20050) INSERT INTO messages(session_key,seq,role,ts,text) SELECT 'codex:example',x+1,'user',1000+x,'js' FROM n`)
 	r, e = x.Search(context.Background(), sessions.SearchQuery{Terms: []string{"js"}, Limit: 50})
 	if e != nil || len(r.Hits) != 50 || !r.Partial || !strings.Contains(r.Note, "through") {
 		t.Fatal(len(r.Hits), r.Partial, r.Note, e)

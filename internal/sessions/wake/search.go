@@ -37,7 +37,8 @@ func ftsDDL(ctx context.Context, tx *sql.Tx, name string) (string, error) {
 
 // sideScanMessages bounds unindexed body/side-table work independently of the
 // indexed body results. Recent rows are visited first; the cutoff is reported.
-const sideScanMessages = 2048
+const sideScanMessages = 20000
+const searchMessageJoin = ` FROM messages m JOIN scope s ON s.key=m.session_key `
 
 func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out sessions.LocalSearchResult, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 8*time.Second)
@@ -45,7 +46,7 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 	var through int64
 	defer func() {
 		if sessions.SearchInterrupted(ctx, err) {
-			out.Bound(through)
+			out.Bound(through, !errors.Is(err, sessions.ErrSearchBound))
 			err = nil
 		}
 		out = sessions.FinishSearch(out, q)
@@ -94,39 +95,8 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 			cjk = nil
 		}
 	}
-	scope := []string{"s.host=''"}
-	var args []any
-	if q.Agent != "" {
-		scope = append(scope, "s.agent_id=?")
-		args = append(args, q.Agent)
-	}
-	if q.Project != "" {
-		scope = append(scope, `(s.project_name LIKE ? ESCAPE '\' OR s.project_path LIKE ? ESCAPE '\')`)
-		args = append(args, sessions.Like(q.Project), sessions.Like(q.Project))
-	}
-	if q.AllowedKeys != nil {
-		keys := make([]string, 0, len(q.AllowedKeys))
-		for k := range q.AllowedKeys {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		marks := make([]string, len(keys))
-		for i, k := range keys {
-			marks[i] = "?"
-			args = append(args, k)
-		}
-		scope = append(scope, "s.key IN ("+strings.Join(marks, ",")+")")
-	}
-	for _, k := range q.ExcludeKeys {
-		scope = append(scope, "s.key<>?")
-		args = append(args, k)
-	}
-	valid, join := "0", ""
-	if format != "" {
-		valid, join = validStructure, structureJoin
-	}
-	cte := `WITH scope AS MATERIALIZED (SELECT s.*,` + valid + ` valid FROM sessions s ` + join + ` WHERE ` + strings.Join(scope, " AND ") + `) `
-	from := ` FROM messages m JOIN scope s ON s.key=m.session_key `
+	cte, args := searchScope(q, format)
+	from := searchMessageJoin
 	where := []string{"1"}
 	if q.Since > 0 {
 		where = append(where, "coalesce(nullif(m.ts,0),s.updated_at)>=?")
@@ -138,17 +108,25 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 	}
 	if q.NeedsStructure() {
 		missing := "s.valid=0"
-		if q.File != "" && format != "2" {
+		if q.FileFilter() && format != "2" {
 			missing = "1"
 		}
-		var partial bool
-		err = tx.QueryRowContext(ctx, cte+`SELECT EXISTS(SELECT 1`+from+` WHERE `+strings.Join(where, " AND ")+` AND (`+missing+`))`, args...).Scan(&partial)
+		var affected int
+		relevant := ""
+		if q.CallFilter() {
+			relevant = " AND coalesce(m.role,'')<>'user'"
+		}
+		err = tx.QueryRowContext(ctx, cte+`SELECT count(DISTINCT m.session_key)`+from+` WHERE `+strings.Join(where, " AND ")+relevant+` AND (`+missing+`)`, args...).Scan(&affected)
 		if err != nil {
 			return out, err
 		}
-		out.Partial = partial
+		reason := "message structure unavailable"
+		if q.FileFilter() {
+			reason = "file records unavailable"
+		}
+		out.Missing(affected, reason)
 		where = append(where, "s.valid=1")
-		if q.File != "" && format != "2" {
+		if q.FileFilter() && format != "2" {
 			where = append(where, "0")
 		}
 	}
@@ -168,7 +146,7 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 			if q.Errors {
 				calls = append(calls, "c.is_error=1")
 			}
-			if q.File != "" && format == "2" {
+			if q.FileFilter() && format == "2" {
 				if !q.Failed && !q.Errors {
 					calls = append(calls, "c.is_error=0")
 				}
@@ -228,7 +206,11 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 			ba = append(ba, sessions.FTSPhrase(tri))
 		}
 		if len(cjk) > 0 {
-			bw = append(bw, "+m.id IN (SELECT rowid FROM messages_cjk WHERE messages_cjk MATCH ?)")
+			column := "m.id"
+			if len(tri) > 0 {
+				column = "+m.id"
+			}
+			bw = append(bw, column+" IN (SELECT rowid FROM messages_cjk WHERE messages_cjk MATCH ?)")
 			ba = append(ba, sessions.FTSPhrase(cjk))
 		}
 		for _, t := range q.Terms {
@@ -242,7 +224,7 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 			limit = q.Limit + 1
 		}
 		ba = append(ba, limit+1)
-		rows, e := tx.QueryContext(ctx, cte+`SELECT m.id,s.valid,coalesce(nullif(m.ts,0),s.updated_at)`+from+` WHERE `+strings.Join(bw, " AND ")+` ORDER BY coalesce(nullif(m.ts,0),s.updated_at) DESC,m.id ASC LIMIT ?`, ba...)
+		rows, e := tx.QueryContext(ctx, bodyCandidateQuery(cte, from, bw, len(tri) > 0 || len(cjk) > 0), ba...)
 		if e != nil {
 			return out, e
 		}
@@ -259,7 +241,7 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 		if len(candidates) > limit {
 			candidates = candidates[:limit]
 			if q.BySession {
-				out.Bound(candidates[len(candidates)-1].at)
+				out.Bound(candidates[len(candidates)-1].at, false)
 			} else {
 				out.More = true
 			}
@@ -297,46 +279,70 @@ func (x *Index) Search(ctx context.Context, q sessions.SearchQuery) (out session
 			}
 		}
 		if len(or) > 0 {
-			for offset := 0; offset <= sideScanMessages; offset += 128 {
-				rows, e := tx.QueryContext(ctx, recent+`SELECT r.id,r.valid,r.at,(`+strings.Join(or, " OR ")+`) FROM recent r JOIN messages m ON m.id=r.id ORDER BY r.at DESC,r.id DESC LIMIT 128 OFFSET ?`, append(sa, offset)...)
-				if e != nil {
+			// The materialized recent range is evaluated once. Keep its cursor open
+			// while loading matched batches on the same read transaction.
+			rows, e := tx.QueryContext(ctx, recent+`SELECT r.id,r.valid,r.at,(`+strings.Join(or, " OR ")+`) FROM recent r JOIN messages m ON m.id=r.id ORDER BY r.at DESC,r.id DESC`, sa...)
+			if e != nil {
+				return out, e
+			}
+			defer rows.Close()
+			batch := make([]candidate, 0, 128)
+			read := 0
+			cut := false
+			var cutoff int64
+			flush := func() error { e := load(batch, false); batch = batch[:0]; through = cutoff; return e }
+			for rows.Next() {
+				var c candidate
+				var match bool
+				if e = rows.Scan(&c.id, &c.valid, &c.at, &match); e != nil {
 					return out, e
 				}
-				var candidates []candidate
-				read := 0
-				cut := false
-				for rows.Next() {
-					var c candidate
-					var match bool
-					if e = rows.Scan(&c.id, &c.valid, &c.at, &match); e != nil {
-						break
-					}
-					read++
-					if offset+read > sideScanMessages {
-						out.Bound(through)
-						cut = true
-						break
-					}
-					through = c.at
-					if match {
-						candidates = append(candidates, c)
-					}
-				}
-				re := rows.Err()
-				rows.Close()
-				if e != nil {
-					return out, e
-				}
-				if re != nil {
-					return out, re
-				}
-				cutoff := through
-				if e = load(candidates, false); e != nil {
-					return out, e
-				}
-				through = cutoff
-				if read < 128 || cut {
+				read++
+				if read > sideScanMessages {
+					cut = true
 					break
+				}
+				cutoff = c.at
+				through = cutoff
+				if match {
+					// Once real hits establish a full result page, older side matches cannot
+					// displace it. Still scan the range to report the coverage cutoff.
+					skip := false
+					if !q.BySession && len(out.Hits) > q.Limit {
+						sessions.SortHits(out.Hits)
+						h := out.Hits[q.Limit-1]
+						at := h.Time
+						if at == 0 {
+							at = h.UpdatedAt
+						}
+						skip = c.at < at
+						if skip {
+							out.More = true
+						}
+					}
+					if !skip {
+						batch = append(batch, c)
+					}
+				}
+				if len(batch) == 128 {
+					if e = flush(); e != nil {
+						return out, e
+					}
+				}
+			}
+			if e = rows.Err(); e != nil {
+				return out, e
+			}
+			rows.Close()
+			if e = flush(); e != nil {
+				return out, e
+			}
+			if cut {
+				if len(tri) == 0 && len(cjk) == 0 {
+					out.Bound(cutoff, false)
+				}
+				if format != "" {
+					out.SideCoverage(cutoff)
 				}
 			}
 		}
@@ -435,4 +441,44 @@ func (x *Index) searchBatch(ctx context.Context, tx *sql.Tx, ids []int64, valid 
 		}
 	}
 	return hits, nil
+}
+
+// searchScope uses the published allow-list as the sole identity filter. A
+// long chain of redundant exclusions changes SQLite cardinality estimates.
+func searchScope(q sessions.SearchQuery, format string) (string, []any) {
+	scope := []string{"s.host=''"}
+	var args []any
+	if q.Agent != "" {
+		scope = append(scope, "s.agent_id=?")
+		args = append(args, q.Agent)
+	}
+	if q.Project != "" {
+		scope = append(scope, `(s.project_name LIKE ? ESCAPE '\' OR s.project_path LIKE ? ESCAPE '\')`)
+		args = append(args, sessions.Like(q.Project), sessions.Like(q.Project))
+	}
+	if q.AllowedKeys != nil {
+		keys := make([]string, 0, len(q.AllowedKeys))
+		for k := range q.AllowedKeys {
+			keys = append(keys, k)
+		}
+		slices.Sort(keys)
+		raw, _ := json.Marshal(keys)
+		scope = append(scope, "s.key IN (SELECT value FROM json_each(?))")
+		args = append(args, string(raw))
+	}
+	valid, join := "0", ""
+	if format != "" {
+		valid, join = validStructure, structureJoin
+	}
+	cte := `WITH scope AS MATERIALIZED (SELECT s.*,` + valid + ` valid FROM sessions s ` + join + ` WHERE ` + strings.Join(scope, " AND ") + `) `
+	return cte, args
+}
+
+// With a large LIMIT SQLite can reverse this join even after exclusions
+// are removed. Indexed body candidates must drive the materialized scope.
+func bodyCandidateQuery(cte, from string, where []string, indexed bool) string {
+	if indexed {
+		from = strings.Replace(from, "JOIN scope s", "CROSS JOIN scope s", 1)
+	}
+	return cte + `SELECT m.id,s.valid,coalesce(nullif(m.ts,0),s.updated_at)` + from + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY coalesce(nullif(m.ts,0),s.updated_at) DESC,s.key,m.id ASC LIMIT ?`
 }
