@@ -68,6 +68,7 @@ Roughly in the order that seems most useful. Structured sessions Phase 1, the Go
 
 - Deferred: side coverage at a shared timestamp. A cut thinking/full-input scan reports its last timestamp as searched, so unread messages of that same millisecond count as covered (on one machine 6,064 of 91,580 messages share a timestamp; a cut overstates by a few). Reporting the cutoff plus one millisecond would be exact.
 - Deferred: a short-word body scan cut between loads states coverage through the last row read, including up to 127 matches not yet loaded.
+- Deferred: a Wake index without its trigram table now gives the fixed source note, so the advice to rebuild the Wake index is lost; a typed configuration error could carry that advice without the raw error text.
 - Deferred S8: a read transaction can slow writers. Measured contention is acceptable for now; WAL or shorter read transactions can be evaluated later.
 - Deferred ACP two-step “no calls” declarations: only two of four observed cases could support that declaration, and the rule would be empirical. Wait for documented ACP format semantics.
 
