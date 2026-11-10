@@ -77,6 +77,16 @@ launchctl bootout gui/$(id -u)/io.github.hebi8.h8c         # stop and unload
 
 The `PATH` entry is there so the node finds the `tailscale` command. The node runs while you are logged in. mDNS worked from a launch agent without any prompt on the machine it was tried on.
 
+macOS asks for access to Documents the first time the node's index refresh reads a project there, and remembers the answer for the code identity it saw. Go and Rust builds carry an ad-hoc signature that changes with every build, so each new `h8c` or `wake-cli` asks again, and until someone answers, that machine's index takes no new sessions. Signing every build with the same certificate and a fixed identifier before putting it in place keeps that identity, so the answer carries over to new builds:
+
+```sh
+codesign --force --sign "alice local signing" --identifier io.github.hebi8.h8c h8c
+codesign --force --sign "alice local signing" --identifier io.github.hebi8.wake-cli wake-cli
+codesign -d -r- h8c    # identifier "io.github.hebi8.h8c" and certificate leaf = H"…"
+```
+
+Replace `alice local signing` with the name of a code-signing identity in your keychain. For builds made on your own machines and copied without a quarantine attribute a self-signed one is enough; it does not get downloaded builds past Gatekeeper. Allow access once for the first build signed this way. Whoever can use the private key can sign a program that macOS takes for `h8c`, so keep the key where only you can use it.
+
 ## Windows: task at logon
 
 In PowerShell, as yourself (no administrator needed for the task itself):
@@ -105,7 +115,7 @@ To check that the node answers on Windows, ask it (`h8c peers`, or `curl.exe htt
 Machines do not have to be updated together. On each one: put the new file in place, then restart the service.
 
 - Linux: replace the file, `systemctl --user restart h8c.service`.
-- macOS: replace the file, `launchctl kickstart -k gui/$(id -u)/io.github.hebi8.h8c`.
+- macOS: sign the new file as described above, replace the installed one, then `launchctl kickstart -k gui/$(id -u)/io.github.hebi8.h8c`.
 - Windows: the running file cannot be replaced. `Stop-ScheduledTask -TaskName "hebi8XC node"`, `Stop-Process -Name h8c`, replace the file, `Start-ScheduledTask -TaskName "hebi8XC node"`.
 
 `h8c version` says what a machine runs, and `h8c peers` what the others run.

@@ -81,7 +81,7 @@ Roughly in the order that seems most useful. Structured sessions Phases 1 to 3 a
 
 - A new node refuses peers for the few seconds before its first roster fetch finishes; they log one line and recover on the next round.
 - Whether Windows needs the UDP 5353 firewall rule for mDNS has not been checked.
-- On macOS every new `h8c` or `wake-cli` binary asks again for access to Documents, because an ad-hoc signature changes with each build. Until someone allows it, the two-minute Wake refresh that `h8c` starts waits on the prompt and holds Wake's write lock, so that machine's index takes no new sessions, while search and sharing go on from the last index. Signing with a stable identity would keep the grant across updates.
+- On macOS every new `h8c` or `wake-cli` binary asks again for access to Documents, because an ad-hoc signature changes with each build. Until someone allows it, the two-minute Wake refresh that `h8c` starts waits on the prompt and holds Wake's write lock, so that machine's index takes no new sessions, while search and sharing go on from the last index. Signing every build with one certificate and a fixed identifier keeps the grant across updates; see [running-as-a-service.md](running-as-a-service.md#macos-launch-agent).
 - Copies of sessions are never removed from a node's cache.
 - The link from `h8c web` stays in the browser's history, and there is no way to log a browser out short of deleting `web.token`.
 - The ACP adapter depends on an undocumented protobuf/SQLite format; unreadable individual files retain their last successful metadata, or are skipped if never read successfully. Native titles and non-text steps are not reconstructed.
