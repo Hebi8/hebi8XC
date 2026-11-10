@@ -354,3 +354,18 @@ func BenchmarkSessions(b *testing.B) {
 		})
 	}
 }
+
+func TestEmptySessionUsesDatabaseMtime(t *testing.T) {
+	dir := t.TempDir()
+	d := acptest.New(t, dir, "empty-clock")
+	d.Exec("DELETE FROM trajectory_metadata_blob")
+	d.SQL.Close()
+	stamp := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	if e := os.Chtimes(d.Path, stamp, stamp); e != nil {
+		t.Fatal(e)
+	}
+	list, e := Open(dir).Sessions(ctx)
+	if e != nil || len(list) != 1 || list[0].Messages != 0 || list[0].CreatedAt != stamp.UnixMilli() || list[0].UpdatedAt != stamp.UnixMilli() {
+		t.Fatal(list, e)
+	}
+}

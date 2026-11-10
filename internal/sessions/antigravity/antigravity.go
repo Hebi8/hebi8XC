@@ -289,6 +289,14 @@ func (x *Index) session(ctx context.Context, name string) (sessions.Session, err
 		s.ToolCalls = &calls
 		s.ToolErrors = &errs
 	}
+	if s.CreatedAt == 0 && s.UpdatedAt == 0 {
+		info, err := os.Stat(path)
+		if err != nil {
+			return s, err
+		}
+		s.CreatedAt = info.ModTime().UnixMilli()
+		s.UpdatedAt = s.CreatedAt
+	}
 	s.UpdatedAt = max(s.UpdatedAt, s.CreatedAt)
 	s.ProjectPath = projectPath(path)
 	if s.ProjectPath != "" {
