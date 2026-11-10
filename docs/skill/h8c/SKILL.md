@@ -52,9 +52,10 @@ Every search answer has `more` and `nodes[]`, one entry per machine:
 
 What to do, by note. Follow the note once; if the machine is still partial, answer with what the search covered (section 6) rather than retrying.
 
-- `<reason> in N matching session(s); …`, where the reason is `message structure unavailable`, `file records unavailable`, `incomplete copies` or `… or complete copies unavailable`: N sessions in scope lack calls or file records, or have copies that stop early, such as copies left by older nodes or Antigravity sessions from before transcripts. The results of the other sessions are complete. To leave those N out, narrow `--since`/`--until`, `--agent` or `--project`. For a file, also search for the path as a term (below).
+- `<reason> in N matching session(s), newest T; add --since after it to leave them out`, where the reason is `message structure unavailable`, `file records unavailable`, `incomplete copies` or `session unreadable`: N sessions in scope lack calls or file records, have copies that stop early, or could not be read, such as copies left by older nodes or Antigravity sessions from before transcripts. The results of the other sessions are complete. If what you look for is newer than T, add `--since` just after T to leave those N out; a copy note adds `refresh the copies to retry`, which reading such a session again does. For a file, also search for the path as a term (below).
 - `search time budget exhausted; …` or `search candidate limit reached; …`, possibly after `messages examined through T; `: the scope was too large. Add `--project` or a narrower `--since`/`--until`, as the note says.
-- `copy search waited for a writer for 5 seconds; …`: a copy was being written. Retry once a little later.
+- `copy search waited for a writer; …`: a copy was being written. Retry once a little later.
+- `local source unavailable; narrow the query or retry`: one of that machine's sources failed. Retry once; if it fails again, answer with what the others covered.
 - `message text searched completely; thinking and full tool inputs searched since …`: goes with `scanned_since`. Search again only if the answer could be in thinking or tool inputs older than that: pick a `--since`/`--until` window around when it happened, small enough to be scanned whole. Text that found no match is not a reason to search again.
 - `peer search unavailable`, `searched held copies`: the machine was searched in copies only.
 
@@ -138,7 +139,7 @@ $ h8c search --file lexer/scan.go --project parser --since 30d --by-session --js
   "sessions": [{"ref": "study/codex:019a7c3e-55d1-7f20-b8e4-3c6a9d2e1f04", "title": "Reject tabs in identifiers",
                 "project": "parser", "rev": 41, "hits": 2, "first": 1180, "last": 1187, …}],
   "nodes": [{"name": "laptop", "searched": "live", "partial": true,
-             "note": "file records unavailable in 37 matching session(s); refresh the source/copies or narrow --agent, --project, --since or --until", …},
+             "note": "file records unavailable in 37 matching session(s), newest 2026-10-12T08:00:00Z; add --since after it to leave them out", …},
             {"name": "study", "searched": "live", …}],
   "more": false
 }
