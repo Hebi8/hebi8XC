@@ -70,12 +70,10 @@ func (c *Client) do(ctx context.Context, method, path string, out any) error {
 		var op *net.OpError
 		if errors.As(err, &op) && op.Op == "dial" {
 			switch {
-			case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES):
+			case errors.Is(err, syscall.EPERM), errors.Is(err, syscall.EACCES), errors.Is(err, syscall.Errno(10013)): // WSAEACCES
 				return fmt.Errorf("control socket access denied; a sandbox may be blocking it: %w", err)
-			case errors.Is(err, syscall.ENOENT), errors.Is(err, syscall.ECONNREFUSED):
-				return ErrNotRunning
 			default:
-				return err
+				return ErrNotRunning
 			}
 		}
 		return err
