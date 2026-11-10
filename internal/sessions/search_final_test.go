@@ -125,3 +125,20 @@ func TestBusySearchStillReportsCopies(t *testing.T) {
 	}
 
 }
+
+// A machine without a session index says so, as a fixed fact, without a warning.
+func TestNoIndexKeepsItsNote(t *testing.T) {
+	var logs bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	desk, _, _ := pair(t)
+	desk.Source = nil
+	mux := http.NewServeMux()
+	desk.ReadRoutes(mux)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest("GET", "/v1/sessions/search?node=desk", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), ErrNoIndex.Error()) || strings.Contains(w.Body.String(), searchSourceUnavailableNote) || strings.Contains(logs.String(), "search source failed") {
+		t.Fatal(w.Code, w.Body.String(), logs.String())
+	}
+}

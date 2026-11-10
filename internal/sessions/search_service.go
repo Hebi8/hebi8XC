@@ -130,6 +130,10 @@ func (s *Service) Search(ctx context.Context, q SearchQuery) (SearchResult, erro
 				a.r = r
 				if e == nil {
 					a.node.Searched = "live"
+				} else if errors.Is(e, ErrNoIndex) {
+					// A fixed fact about this machine, not an internal error.
+					a.node.Partial = true
+					a.node.Note = JoinNote(a.node.Note, ErrNoIndex.Error())
 				} else {
 					a.node.Partial = true
 					slog.WarnContext(ctx, "search source failed", "err", e)
